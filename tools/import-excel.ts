@@ -15,442 +15,568 @@
  */
 
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile as readTextFile, writeFile } from "node:fs/promises";
 
-import * as XLSX from "xlsx";
+import { readFile as readWorkbook, SSF, utils } from "xlsx";
 
+import { parseBackup } from "../src/lib/store";
+import type { BackupFile } from "../src/lib/store";
+import { EXPENSE_CATS, INCOME_CATS } from "../src/lib/types";
+import type {
+  Kind,
+  Loan,
+  LoanDirection,
+  Recurring,
+  Txn,
+} from "../src/lib/types";
 import { parseTransactionText } from "./financial-parser";
 
-const round2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
-const parseAmount = (raw: any): number => {
-  if (typeof raw === "number") {
-    return round2(raw);
+const round2 = (amount: number): number =>
+  Math.round((Number(amount) || 0) * 100) / 100;
+const pad = (value: number): string => (value < 10 ? `0${value}` : `${value}`);
+const isoDay = (date: Date): string =>
+  `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+const addMonths = (dateString: string, months: number): string => {
+  const [year, month, day] = dateString.split("-").map(Number);
+  const date = new Date(year, month - 1 + months, day);
+  return isoDay(date);
+};
+
+const addDays = (dateString: string, days: number): string => {
+  const [year, month, day] = dateString.split("-").map(Number);
+  const date = new Date(year, month - 1, day + days);
+  return isoDay(date);
+};
+
+const compareDateStrings = (first: string, second: string): number => {
+  if (first < second) {
+    return -1;
+  }
+  if (first > second) {
+    return 1;
+  }
+  return 0;
+};
+
+let fallbackUidCounter = 0;
+const uid = (prefix = "t"): string => {
+  try {
+    return `${prefix}-${crypto.randomUUID()}`;
+  } catch {
+    fallbackUidCounter += 1;
+    return `${prefix}-${Date.now().toString(36)}-${fallbackUidCounter.toString(36)}`;
+  }
+};
+
+const parseAmount = (raw: ExcelCell): number => {
+  const directNumber = Number(raw);
+  if (raw === directNumber && Number.isFinite(directNumber)) {
+    return round2(directNumber);
   }
   const cleaned = String(raw).replaceAll(/[^0-9.]/gu, "");
   if (!cleaned) {
     return 0;
   }
-  const parts = cleaned.split(".");
+  const [firstPart = "", ...remainingParts] = cleaned.split(".");
   const normalized =
-    parts.length <= 2 ? cleaned : `${parts[0]}.${parts.slice(1).join("")}`;
-  const v = Number(normalized);
-  return Number.isFinite(v) ? round2(v) : 0;
-};
-const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-const isoDay = (d: Date) =>
-  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const addMonths = (dateStr: string, months: number) => {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const dt = new Date(y, m - 1 + months, d);
-  return isoDay(dt);
-};
-const uid = (prefix = "t"): string => {
-  try {
-    return `${prefix}-${crypto.randomUUID()}`;
-  } catch {
-    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  }
+    remainingParts.length === 0
+      ? cleaned
+      : `${firstPart}.${remainingParts.join("")}`;
+  const amount = Number(normalized);
+  return Number.isFinite(amount) ? round2(amount) : 0;
 };
 
-const parseExcelDate = (raw: any): string => {
+const parseExcelDate = (raw: ExcelCell): string => {
   if (!raw) {
     return isoDay(new Date());
   }
-  if (typeof raw === "number" && raw > 30_000 && raw < 60_000) {
-    const d = XLSX.SSF.parse_date_code(raw);
-    if (d) {
-      return `${d.y}-${pad(d.m)}-${pad(d.d)}`;
+  const numericSerial = Number(raw);
+  if (
+    raw === numericSerial &&
+    numericSerial > 30_000 &&
+    numericSerial < 60_000
+  ) {
+    const parsedSerial = SSF.parse_date_code(numericSerial);
+    if (parsedSerial) {
+      return `${parsedSerial.y}-${pad(parsedSerial.m)}-${pad(parsedSerial.d)}`;
     }
   }
-  const str = String(raw).trim();
-  const ddmmyyyy = str.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
-  if (ddmmyyyy) {
-    const [, dd, mm, yyyy] = ddmmyyyy;
-    let y = Number(yyyy);
-    if (y < 100) {
-      y += 2000;
+
+  const text = String(raw).trim();
+  const dayFirstMatch = text.match(
+    /^(?<day>\d{1,2})[/-](?<month>\d{1,2})[/-](?<year>\d{2,4})$/u
+  );
+  if (dayFirstMatch?.groups) {
+    const {
+      day: dayText,
+      month: monthText,
+      year: yearText,
+    } = dayFirstMatch.groups;
+    let year = Number(yearText);
+    if (year < 100) {
+      year += 2000;
     }
-    const m = Number(mm);
-    const d = Number(dd);
-    if (m > 12 && d <= 12) {
-      return `${y}-${pad(d)}-${pad(m)}`;
+    const month = Number(monthText);
+    const day = Number(dayText);
+    if (month > 12 && day <= 12) {
+      return `${year}-${pad(day)}-${pad(month)}`;
     }
-    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
-      return `${y}-${pad(m)}-${pad(d)}`;
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${year}-${pad(month)}-${pad(day)}`;
     }
   }
-  const iso = str.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
-  if (iso) {
-    const [, y, m, d] = iso;
-    return `${y}-${pad(Number(m))}-${pad(Number(d))}`;
+
+  const yearFirstMatch = text.match(
+    /^(?<year>\d{4})[/-](?<month>\d{1,2})[/-](?<day>\d{1,2})/u
+  );
+  if (yearFirstMatch?.groups) {
+    const { year, month, day } = yearFirstMatch.groups;
+    return `${year}-${pad(Number(month))}-${pad(Number(day))}`;
   }
-  const parsed = new Date(str);
-  if (!Number.isNaN(parsed.getTime())) {
-    return isoDay(parsed);
+
+  const parsedDate = new Date(text);
+  if (!Number.isNaN(parsedDate.getTime())) {
+    return isoDay(parsedDate);
   }
   return isoDay(new Date());
 };
 
+type ExcelCell = string | number | boolean | Date | null | undefined;
+
 interface RawRow {
-  Date?: any;
-  Details?: any;
-  "Ref No/Cheque No"?: any;
-  Debit?: any;
-  Credit?: any;
-  Balance?: any;
-  [key: string]: any;
+  Date?: ExcelCell;
+  Details?: ExcelCell;
+  "Ref No/Cheque No"?: ExcelCell;
+  Debit?: ExcelCell;
+  Credit?: ExcelCell;
+  Balance?: ExcelCell;
+  [key: string]: ExcelCell;
 }
 
-const normalizeHeaders = (row: any): RawRow => {
-  const out: any = {};
-  for (const [k, v] of Object.entries(row)) {
-    const key = String(k).trim().toLowerCase();
+const normalizeHeaders = (row: RawRow): RawRow => {
+  const normalizedRow: RawRow = {};
+  for (const [rawKey, value] of Object.entries(row)) {
+    const key = rawKey.trim().toLowerCase();
     if (key.includes("date")) {
-      out.Date = v;
+      normalizedRow.Date = value;
     } else if (
       key.includes("detail") ||
       key.includes("narration") ||
       key.includes("particular") ||
       key.includes("description")
     ) {
-      out.Details = v;
+      normalizedRow.Details = value;
     } else if (
       key.includes("ref") ||
       key.includes("cheque") ||
       key.includes("chq")
     ) {
-      out["Ref No/Cheque No"] = v;
+      normalizedRow["Ref No/Cheque No"] = value;
     } else if (
       key === "debit" ||
       key.includes("debit") ||
       key.includes("withdrawal") ||
       key === "dr"
     ) {
-      out.Debit = v;
+      normalizedRow.Debit = value;
     } else if (
       key === "credit" ||
       key.includes("credit") ||
       key.includes("deposit") ||
       key === "cr"
     ) {
-      out.Credit = v;
+      normalizedRow.Credit = value;
     } else if (key.includes("balance")) {
-      out.Balance = v;
+      normalizedRow.Balance = value;
     } else {
-      out[k] = v;
+      normalizedRow[rawKey] = value;
     }
   }
-  return out as RawRow;
+  return normalizedRow;
 };
 
 interface ConvertResult {
-  txns: any[];
-  loans: any[];
-  recurrings: any[];
+  txns: Txn[];
+  loans: Loan[];
+  recurrings: Recurring[];
   salaryHints: number[];
 }
 
-const mapToPebbleCategory = (rawCat: string, kind: string): string => {
-  const validExpense = [
-    "Groceries",
-    "Dining",
-    "Transport",
-    "Rent",
-    "Utilities",
-    "Subscriptions",
-    "Shopping",
-    "Health",
-    "Fun",
-    "Travel",
-    "Education",
-    "Other",
-  ];
-  const validIncome = [
-    "Salary",
-    "Freelance",
-    "Business",
-    "Interest",
-    "Gift",
-    "Refund",
-    "Other",
-  ];
-  const cat = rawCat.trim();
-  const lower = cat.toLowerCase();
-  // Health & Medical mapping per spec - ponytail: reuse existing health detection, map to Pebble Health
+interface BillEntry {
+  date: string;
+  amount: number;
+}
+
+interface RecurringTracker {
+  entries: BillEntry[];
+  recurringIdx: number;
+}
+
+interface ConversionContext extends ConvertResult {
+  seenRecurring: Set<string>;
+  recurringTracker: Map<string, RecurringTracker>;
+}
+
+interface PreparedTransaction {
+  amount: number;
+  date: string;
+  kind: Kind;
+  note: string;
+  payment: string;
+  category: string;
+  parsed: ReturnType<typeof parseTransactionText>;
+}
+
+const normalizeTitle = (title: string): string =>
+  title.toLowerCase().replaceAll(/\s+/gu, " ").trim().slice(0, 80);
+
+const normalizeMergeTitle = (title: string): string =>
+  title.toLowerCase().replaceAll(/\s+/gu, " ").trim();
+
+const isGasCylinder = (title: string): boolean => {
+  const lowerTitle = title.toLowerCase();
+  return (
+    (lowerTitle.includes("gas") &&
+      (lowerTitle.includes("cylinder") || lowerTitle.includes("lpg"))) ||
+    lowerTitle.includes("gas cylinder")
+  );
+};
+
+const mapToPebbleCategory = (rawCategory: string, kind: Kind): string => {
+  const category = rawCategory.trim();
+  const lowerCategory = category.toLowerCase();
   if (
-    lower.startsWith("health & medical") ||
-    lower === "health & medical (doctor consultation)" ||
-    lower === "health"
+    lowerCategory.startsWith("health & medical") ||
+    lowerCategory === "health & medical (doctor consultation)" ||
+    lowerCategory === "health"
   ) {
     return kind === "expense" ? "Health" : "Other";
   }
-  if (lower.includes("health & medical")) {
+  if (lowerCategory.includes("health & medical")) {
     return kind === "expense" ? "Health" : "Other";
   }
-  if (kind === "expense" && validExpense.includes(cat)) {
-    return cat;
+  if (kind === "expense" && EXPENSE_CATS.includes(category)) {
+    return category;
   }
-  if (kind === "income" && validIncome.includes(cat)) {
-    return cat;
+  if (kind === "income" && INCOME_CATS.includes(category)) {
+    return category;
   }
-  if (cat === "Salary") {
+  if (category === "Salary") {
     return "Salary";
   }
-  // Additional medical keywords fallback
-  if (
-    lower.includes("medical") ||
-    lower.includes("doctor") ||
-    lower.includes("clinic") ||
-    lower.includes("pharma") ||
-    lower.includes("hospital")
-  ) {
+  const medicalKeywords = ["medical", "doctor", "clinic", "pharma", "hospital"];
+  const includesMedicalKeyword = medicalKeywords.some((keyword) =>
+    lowerCategory.includes(keyword)
+  );
+  if (includesMedicalKeyword) {
     return kind === "expense" ? "Health" : "Other";
   }
   return "Other";
 };
 
-const convertRows = (rows: RawRow[]): ConvertResult => {
-  const txns: any[] = [];
-  const loans: any[] = [];
-  const recurrings: any[] = [];
-  const salaryHints: number[] = [];
-  const seenRecurring = new Set<string>();
-  // Variable bill tracker: key = normalized title, value = { entries: {date, amount}[], recurringIdx }
-  const recurringTracker = new Map<
-    string,
-    { entries: { date: string; amount: number }[]; recurringIdx: number }
-  >();
-
-  const normalizeTitle = (t: string) =>
-    t.toLowerCase().replaceAll(/\s+/g, " ").trim().slice(0, 80);
-  const isGasCylinder = (title: string) => {
-    const lower = title.toLowerCase();
-    return (
-      (lower.includes("gas") &&
-        (lower.includes("cylinder") || lower.includes("lpg"))) ||
-      lower.includes("gas cylinder")
-    );
-  };
-  const addDays = (dateStr: string, days: number) => {
-    const [y, m, d] = dateStr.split("-").map(Number);
-    const dt = new Date(y, m - 1, d + days);
-    return isoDay(dt);
-  };
-
-  for (const raw of rows) {
-    const r = normalizeHeaders(raw);
-    if (!r.Date && !r.Details && !r.Debit && !r.Credit) {
-      continue;
-    }
-
-    const debit = parseAmount(r.Debit ?? 0);
-    const credit = parseAmount(r.Credit ?? 0);
-    if (debit <= 0 && credit <= 0) {
-      continue;
-    }
-
-    const isExpense = debit > 0;
-    const amount = isExpense ? debit : credit;
-    const date = parseExcelDate(r.Date);
-    const rawDetails = String(
-      r.Details || r["Ref No/Cheque No"] || "Bank transaction"
-    );
-
-    const parsed = parseTransactionText(rawDetails);
-    const kind = parsed.transaction_type === "INFLOW" ? "income" : "expense";
-
-    let pebblePayment = "Bank";
-    if (parsed.payment_method === "UPI") {
-      pebblePayment = "UPI";
-    } else if (parsed.payment_method === "CASH") {
-      pebblePayment = "Cash";
-    } else if (parsed.payment_method === "ATM") {
-      pebblePayment = "Card";
-    } else if (
-      parsed.payment_method === "OTHER" &&
-      parsed.is_bill &&
-      parsed.counterparty.includes("CARD")
-    ) {
-      pebblePayment = "Card";
-    } else {
-      pebblePayment = "Bank";
-    }
-
-    const note = parsed.clean_note.slice(0, 200);
-    let category = mapToPebbleCategory(parsed.expense_category, kind);
-
-    if (parsed.is_salary) {
-      category = "Salary";
-      salaryHints.push(amount);
-    }
-
-    if (parsed.is_lending) {
-      const person =
-        parsed.counterparty
-          .replaceAll(/\b(HDFC|KKBK|YESB|UTIB|IPOS|DEPOSIT|CASH|UPI)\b/gi, "")
-          .trim()
-          .slice(0, 40) || "Unknown";
-      const direction = kind === "expense" ? "lent" : "borrowed";
-      const loan = {
-        amount: round2(amount),
-        createdAt: new Date().toISOString(),
-        date,
-        direction,
-        dueDate: "",
-        note,
-        person,
-        repaid: 0,
-        status: "open",
-        uid: uid("l"),
-      };
-      loans.push(loan);
-      txns.push({
-        amount: round2(amount),
-        category: "Lending",
-        createdAt: new Date().toISOString(),
-        date,
-        kind: direction === "lent" ? "expense" : "income",
-        loanUid: loan.uid,
-        note:
-          direction === "lent"
-            ? `Lent to ${person}`
-            : `Borrowed from ${person}`,
-        payment: pebblePayment,
-        uid: uid("t"),
-      });
-      continue;
-    }
-
-    if (
-      parsed.is_bill &&
-      (parsed.counterparty.toUpperCase().includes("SBI CARDS") ||
-        parsed.counterparty.toUpperCase().includes("CRED") ||
-        (parsed.counterparty.toUpperCase().includes("CARD") &&
-          parsed.user_remark.toLowerCase().includes("bill")))
-    ) {
-      const key = "card-bill";
-      if (seenRecurring.has(key)) {
-        const existing = recurrings.find((r) => r.card);
-        if (existing) {
-          existing.settlements = [
-            ...(existing.settlements || []),
-            { amount: round2(amount), date, pay: "Bank" },
-          ].toSorted((a: any, b: any) =>
-            a.date < b.date ? -1 : a.date > b.date ? 1 : 0
-          );
-          // pick latest by max date
-          const latestSettle = existing.settlements.at(-1);
-          existing.lastPaid = latestSettle.date;
-          existing.nextDue = addMonths(latestSettle.date, 1);
-          const allAmounts = existing.settlements.map((s: any) => s.amount);
-          const avg =
-            allAmounts.reduce((a: number, b: number) => a + b, 0) /
-            allAmounts.length;
-          existing.amount = round2(avg);
-          existing.averageAmount = round2(avg);
-          existing.latestAmount = round2(latestSettle.amount);
-          existing.occurrences = allAmounts.length;
-          existing.amounts = [...allAmounts];
-        }
-      } else {
-        seenRecurring.add(key);
-        recurrings.push({
-          active: true,
-          amount: round2(amount),
-          amounts: [round2(amount)],
-          averageAmount: round2(amount),
-          card: true,
-          category: "Other",
-          createdAt: new Date().toISOString(),
-          frequency: "monthly",
-          lastPaid: date,
-          latestAmount: round2(amount),
-          nextDue: addMonths(date, 1),
-          occurrences: 1,
-          settlements: [{ amount: round2(amount), date, pay: "Bank" }],
-          title: "Credit card bill",
-          uid: uid("r"),
-        });
-      }
-      continue;
-    }
-
-    // Regular bill: variable amount handling - dedup by title only, not amount
-    // Ponytail ladder: 1) YAGNI - need variable bills, 2) reuse existing parser, 3) stdlib Date, 4) minimal code
-    if (parsed.is_bill && parsed.is_recurring_candidate) {
-      const rawTitle = parsed.counterparty.slice(0, 60);
-      const normKey = normalizeTitle(rawTitle);
-      if (parsed.counterparty !== "Unknown" && amount > 0) {
-        const isGas = isGasCylinder(rawTitle);
-        const freq = isGas ? "variable" : "monthly";
-        if (recurringTracker.has(normKey)) {
-          const tracker = recurringTracker.get(normKey)!;
-          tracker.entries.push({ amount: round2(amount), date });
-          // Recompute from all entries sorted by date to get correct latest
-          const sorted = [...tracker.entries].toSorted((a, b) =>
-            a.date < b.date ? -1 : a.date > b.date ? 1 : 0
-          );
-          const amounts = sorted.map((e) => e.amount);
-          const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
-          const latestEntry = sorted.at(-1);
-          const rec = recurrings[tracker.recurringIdx];
-          rec.averageAmount = round2(avg);
-          rec.latestAmount = round2(latestEntry.amount);
-          rec.amount = round2(avg);
-          rec.lastPaid = latestEntry.date;
-          rec.occurrences = amounts.length;
-          rec.amounts = [...amounts];
-          rec.frequency =
-            isGas || rec.frequency === "variable" ? "variable" : "monthly";
-          rec.nextDue =
-            rec.frequency === "variable"
-              ? addDays(latestEntry.date, 50)
-              : addMonths(latestEntry.date, 1);
-        } else {
-          const rec = {
-            active: true,
-            amount: round2(amount),
-            amounts: [round2(amount)],
-            averageAmount: round2(amount),
-            card: false,
-            category: category === "Other" ? "Utilities" : category,
-            createdAt: new Date().toISOString(),
-            frequency: freq,
-            lastPaid: date,
-            latestAmount: round2(amount),
-            nextDue:
-              freq === "variable" ? addDays(date, 50) : addMonths(date, 1),
-            occurrences: 1,
-            settlements: [],
-            title: rawTitle,
-            uid: uid("r"),
-          };
-          recurrings.push(rec);
-          recurringTracker.set(normKey, {
-            entries: [{ amount: round2(amount), date }],
-            recurringIdx: recurrings.length - 1,
-          });
-          seenRecurring.add(normKey);
-        }
-      }
-    }
-
-    txns.push({
-      amount: round2(amount),
-      category,
-      createdAt: new Date().toISOString(),
-      date,
-      kind,
-      note,
-      payment: pebblePayment,
-      uid: uid("t"),
-    });
+const getPebblePayment = (
+  parsed: ReturnType<typeof parseTransactionText>
+): string => {
+  if (parsed.payment_method === "UPI") {
+    return "UPI";
   }
-
-  return { loans, recurrings, salaryHints, txns };
+  if (parsed.payment_method === "CASH") {
+    return "Cash";
+  }
+  if (parsed.payment_method === "ATM") {
+    return "Card";
+  }
+  const isUnspecifiedCardBill =
+    parsed.payment_method === "OTHER" &&
+    parsed.is_bill &&
+    parsed.counterparty.includes("CARD");
+  return isUnspecifiedCardBill ? "Card" : "Bank";
 };
 
-const printHelp = () => {
+const prepareTransaction = (rawRow: RawRow): PreparedTransaction | null => {
+  const row = normalizeHeaders(rawRow);
+  if (!row.Date && !row.Details && !row.Debit && !row.Credit) {
+    return null;
+  }
+
+  const debit = parseAmount(row.Debit ?? 0);
+  const credit = parseAmount(row.Credit ?? 0);
+  if (debit <= 0 && credit <= 0) {
+    return null;
+  }
+
+  const isExpense = debit > 0;
+  const amount = isExpense ? debit : credit;
+  const date = parseExcelDate(row.Date);
+  const rawDetails = String(
+    row.Details || row["Ref No/Cheque No"] || "Bank transaction"
+  );
+  const parsed = parseTransactionText(rawDetails);
+  const kind: Kind =
+    parsed.transaction_type === "INFLOW" ? "income" : "expense";
+  const category = mapToPebbleCategory(parsed.expense_category, kind);
+  return {
+    amount,
+    category,
+    date,
+    kind,
+    note: parsed.clean_note.slice(0, 200),
+    parsed,
+    payment: getPebblePayment(parsed),
+  };
+};
+
+const createTransaction = (
+  prepared: PreparedTransaction,
+  overrides: {
+    category?: string;
+    kind?: Kind;
+    loanUid?: string;
+    note?: string;
+  } = {}
+): Txn => {
+  const transaction: Txn = {
+    amount: round2(prepared.amount),
+    category: overrides.category ?? prepared.category,
+    createdAt: new Date().toISOString(),
+    date: prepared.date,
+    kind: overrides.kind ?? prepared.kind,
+    note: overrides.note ?? prepared.note,
+    payment: prepared.payment,
+    uid: uid("t"),
+  };
+  if (overrides.loanUid) {
+    transaction.loanUid = overrides.loanUid;
+  }
+  return transaction;
+};
+
+const isCardBill = (
+  parsed: ReturnType<typeof parseTransactionText>
+): boolean => {
+  const upperCounterparty = parsed.counterparty.toUpperCase();
+  const isCardCompany =
+    upperCounterparty.includes("SBI CARDS") ||
+    upperCounterparty.includes("CRED");
+  const isCardStatement =
+    upperCounterparty.includes("CARD") &&
+    parsed.user_remark.toLowerCase().includes("bill");
+  return parsed.is_bill && (isCardCompany || isCardStatement);
+};
+
+const upsertCardBill = (
+  context: ConversionContext,
+  prepared: PreparedTransaction
+): void => {
+  const key = "card-bill";
+  if (context.seenRecurring.has(key)) {
+    const existing = context.recurrings.find((recurring) => recurring.card);
+    if (!existing) {
+      return;
+    }
+    const settlements = [
+      ...(existing.settlements ?? []),
+      { amount: round2(prepared.amount), date: prepared.date, pay: "Bank" },
+    ].toSorted((first, second) => compareDateStrings(first.date, second.date));
+    const latestSettlement = settlements.at(-1);
+    if (!latestSettlement) {
+      return;
+    }
+    const amounts = settlements.map((settlement) => settlement.amount);
+    const average =
+      amounts.reduce((total, amount) => total + amount, 0) / amounts.length;
+    existing.settlements = settlements;
+    existing.lastPaid = latestSettlement.date;
+    existing.nextDue = addMonths(latestSettlement.date, 1);
+    existing.amount = round2(average);
+    existing.averageAmount = round2(average);
+    existing.latestAmount = round2(latestSettlement.amount);
+    existing.occurrences = amounts.length;
+    existing.amounts = [...amounts];
+    return;
+  }
+
+  context.seenRecurring.add(key);
+  context.recurrings.push({
+    active: true,
+    amount: round2(prepared.amount),
+    amounts: [round2(prepared.amount)],
+    averageAmount: round2(prepared.amount),
+    card: true,
+    category: "Other",
+    createdAt: new Date().toISOString(),
+    frequency: "monthly",
+    lastPaid: prepared.date,
+    latestAmount: round2(prepared.amount),
+    nextDue: addMonths(prepared.date, 1),
+    occurrences: 1,
+    settlements: [
+      { amount: round2(prepared.amount), date: prepared.date, pay: "Bank" },
+    ],
+    title: "Credit card bill",
+    uid: uid("r"),
+  });
+};
+
+const updateTrackedRecurring = (
+  context: ConversionContext,
+  prepared: PreparedTransaction,
+  rawTitle: string
+): void => {
+  const normalizedTitle = normalizeTitle(rawTitle);
+  const isVariableBill = isGasCylinder(rawTitle);
+  const tracker = context.recurringTracker.get(normalizedTitle);
+
+  if (tracker) {
+    tracker.entries.push({
+      amount: round2(prepared.amount),
+      date: prepared.date,
+    });
+    const sortedEntries = [...tracker.entries].toSorted((first, second) =>
+      compareDateStrings(first.date, second.date)
+    );
+    const amounts = sortedEntries.map((entry) => entry.amount);
+    const average =
+      amounts.reduce((total, amount) => total + amount, 0) / amounts.length;
+    const latestEntry = sortedEntries.at(-1);
+    const recurring = context.recurrings[tracker.recurringIdx];
+    if (!(latestEntry && recurring)) {
+      return;
+    }
+    recurring.averageAmount = round2(average);
+    recurring.latestAmount = round2(latestEntry.amount);
+    recurring.amount = round2(average);
+    recurring.lastPaid = latestEntry.date;
+    recurring.occurrences = amounts.length;
+    recurring.amounts = [...amounts];
+    recurring.frequency =
+      isVariableBill || recurring.frequency === "variable"
+        ? "variable"
+        : "monthly";
+    recurring.nextDue =
+      recurring.frequency === "variable"
+        ? addDays(latestEntry.date, 50)
+        : addMonths(latestEntry.date, 1);
+    return;
+  }
+
+  const frequency = isVariableBill ? "variable" : "monthly";
+  const recurring: Recurring = {
+    active: true,
+    amount: round2(prepared.amount),
+    amounts: [round2(prepared.amount)],
+    averageAmount: round2(prepared.amount),
+    card: false,
+    category: prepared.category === "Other" ? "Utilities" : prepared.category,
+    createdAt: new Date().toISOString(),
+    frequency,
+    lastPaid: prepared.date,
+    latestAmount: round2(prepared.amount),
+    nextDue:
+      frequency === "variable"
+        ? addDays(prepared.date, 50)
+        : addMonths(prepared.date, 1),
+    occurrences: 1,
+    settlements: [],
+    title: rawTitle,
+    uid: uid("r"),
+  };
+  context.recurrings.push(recurring);
+  context.recurringTracker.set(normalizedTitle, {
+    entries: [{ amount: round2(prepared.amount), date: prepared.date }],
+    recurringIdx: context.recurrings.length - 1,
+  });
+  context.seenRecurring.add(normalizedTitle);
+};
+
+const addLendingRecords = (
+  context: ConversionContext,
+  prepared: PreparedTransaction
+): void => {
+  const person =
+    prepared.parsed.counterparty
+      .replaceAll(/\b(?:HDFC|KKBK|YESB|UTIB|IPOS|DEPOSIT|CASH|UPI)\b/giu, "")
+      .trim()
+      .slice(0, 40) || "Unknown";
+  const direction: LoanDirection =
+    prepared.kind === "expense" ? "lent" : "borrowed";
+  const loan: Loan = {
+    amount: round2(prepared.amount),
+    createdAt: new Date().toISOString(),
+    date: prepared.date,
+    direction,
+    dueDate: "",
+    note: prepared.note,
+    person,
+    repaid: 0,
+    status: "open",
+    uid: uid("l"),
+  };
+  context.loans.push(loan);
+  const note =
+    direction === "lent" ? `Lent to ${person}` : `Borrowed from ${person}`;
+  context.txns.push(
+    createTransaction(prepared, {
+      category: "Lending",
+      kind: direction === "lent" ? "expense" : "income",
+      loanUid: loan.uid,
+      note,
+    })
+  );
+};
+
+const processPreparedTransaction = (
+  context: ConversionContext,
+  prepared: PreparedTransaction
+): void => {
+  if (prepared.parsed.is_salary) {
+    prepared.category = "Salary";
+    context.salaryHints.push(prepared.amount);
+  }
+  if (prepared.parsed.is_lending) {
+    addLendingRecords(context, prepared);
+    return;
+  }
+  if (isCardBill(prepared.parsed)) {
+    upsertCardBill(context, prepared);
+    return;
+  }
+  if (prepared.parsed.is_bill && prepared.parsed.is_recurring_candidate) {
+    const rawTitle = prepared.parsed.counterparty.slice(0, 60);
+    if (rawTitle !== "Unknown" && prepared.amount > 0) {
+      updateTrackedRecurring(context, prepared, rawTitle);
+    }
+  }
+  context.txns.push(createTransaction(prepared));
+};
+
+const createConversionContext = (): ConversionContext => ({
+  loans: [],
+  recurringTracker: new Map<string, RecurringTracker>(),
+  recurrings: [],
+  salaryHints: [],
+  seenRecurring: new Set<string>(),
+  txns: [],
+});
+
+const convertRows = (rows: RawRow[]): ConvertResult => {
+  const context = createConversionContext();
+  for (const row of rows) {
+    const prepared = prepareTransaction(row);
+    if (prepared) {
+      processPreparedTransaction(context, prepared);
+    }
+  }
+  return {
+    loans: context.loans,
+    recurrings: context.recurrings,
+    salaryHints: context.salaryHints,
+    txns: context.txns,
+  };
+};
+
+const printHelp = (): void => {
   console.log(`
 Pebble Excel Importer - with Financial Parsing Engine
 
@@ -482,276 +608,355 @@ Output is Pebble BackupFile ready for Care > Restore.
 `);
 };
 
-const main = async () => {
-  const args = process.argv.slice(2);
-  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
-    printHelp();
-    process.exit(0);
+const average = (values: number[]): number =>
+  values.length === 0
+    ? 0
+    : values.reduce((total, value) => total + value, 0) / values.length;
+
+const makeInitialBackup = (result: ConvertResult): BackupFile => ({
+  app: "pebble",
+  deviceId: "local",
+  exportedAt: new Date().toISOString(),
+  loans: result.loans,
+  promises: [],
+  recurrings: result.recurrings,
+  settings: {
+    budgets: {},
+    currency: "₹",
+    expectedSalary: round2(average(result.salaryHints)),
+    incomeAcks: {},
+    lastBackupAt: "",
+    name: "Friend",
+    payday: 1,
+  },
+  transactions: result.txns,
+  version: 2,
+});
+
+const printConversionSummary = (result: ConvertResult): void => {
+  const expenseCount = result.txns.filter(
+    (transaction) => transaction.kind === "expense"
+  ).length;
+  const incomeCount = result.txns.filter(
+    (transaction) => transaction.kind === "income"
+  ).length;
+  console.log("\n💰 Parsed:");
+  console.log(`   - ${result.txns.length} transactions`);
+  console.log(`     expense: ${expenseCount}, income: ${incomeCount}`);
+  console.log(`   - ${result.loans.length} lending/borrow`);
+  console.log(`   - ${result.recurrings.length} bills/recurring`);
+  if (result.salaryHints.length > 0) {
+    console.log(
+      `   - salary hints: ${result.salaryHints.length}, avg ${round2(average(result.salaryHints))}`
+    );
   }
 
-  const excelPath = args[0];
-  if (!existsSync(excelPath)) {
-    console.error(`❌ File not found: ${excelPath}`);
-    process.exit(1);
-  }
-
-  const outIdx = args.indexOf("--out");
-  const mergeIdx = args.indexOf("--merge");
-  const dryRun = args.includes("--dry-run");
-  const outPath =
-    outIdx === -1
-      ? `pebble-import-${isoDay(new Date())}.json`
-      : args[outIdx + 1];
-  const mergePath = mergeIdx === -1 ? null : args[mergeIdx + 1];
-
-  console.log(`📖 Reading ${excelPath}...`);
-  const wb = XLSX.readFile(excelPath);
-  const sheetName = wb.SheetNames[0];
-  if (!sheetName) {
-    console.error("❌ No sheets");
-    process.exit(1);
-  }
-  const sheet = wb.Sheets[sheetName];
-  const jsonRows = XLSX.utils.sheet_to_json<RawRow>(sheet, { defval: "" });
-  console.log(`📄 ${jsonRows.length} rows in "${sheetName}"`);
-
-  const { txns, loans, recurrings, salaryHints } = convertRows(jsonRows);
-
-  console.log(`\n💰 Parsed:`);
-  console.log(`   - ${txns.length} transactions`);
-  console.log(
-    `     expense: ${txns.filter((t: any) => t.kind === "expense").length}, income: ${txns.filter((t: any) => t.kind === "income").length}`
-  );
-  console.log(`   - ${loans.length} lending/borrow`);
-  console.log(`   - ${recurrings.length} bills/recurring`);
-  if (salaryHints.length) {
-    const avg =
-      salaryHints.reduce((a: number, b: number) => a + b, 0) /
-      salaryHints.length;
-    console.log(`   - salary hints: ${salaryHints.length}, avg ${round2(avg)}`);
-  }
-
-  const byCat = new Map<string, number>();
-  for (const t of txns) {
-    if (t.kind === "expense") {
-      byCat.set(t.category, (byCat.get(t.category) || 0) + t.amount);
+  const byCategory = new Map<string, number>();
+  for (const transaction of result.txns) {
+    if (transaction.kind === "expense") {
+      const current = byCategory.get(transaction.category) ?? 0;
+      byCategory.set(transaction.category, current + transaction.amount);
     }
   }
-  console.log(`\n📊 Where it went (expense by category):`);
-  for (const [cat, amt] of [...byCat.entries()].toSorted(
-    (a, b) => b[1] - a[1]
-  )) {
-    console.log(`   - ${cat}: ${amt}`);
+  console.log("\n📊 Where it went (expense by category):");
+  const categoriesBySpend = [...byCategory.entries()].toSorted(
+    ([, firstAmount], [, secondAmount]) => secondAmount - firstAmount
+  );
+  for (const [category, amount] of categoriesBySpend) {
+    console.log(`   - ${category}: ${amount}`);
   }
 
-  // Variable bills report
-  const variableBills = recurrings.filter(
-    (r: any) => r.occurrences > 1 || r.amounts?.length > 1
+  const variableBills = result.recurrings.filter(
+    (recurring) =>
+      (recurring.occurrences ?? 0) > 1 || (recurring.amounts?.length ?? 0) > 1
   );
-  if (variableBills.length) {
-    console.log(`\n⚡ Variable bills (same title, different amounts):`);
-    for (const rb of variableBills) {
+  if (variableBills.length > 0) {
+    console.log("\n⚡ Variable bills (same title, different amounts):");
+    for (const recurring of variableBills) {
       console.log(
-        `   - ${rb.title}: amounts=${JSON.stringify(rb.amounts)} avg=${rb.averageAmount} latest=${rb.latestAmount} lastPaid=${rb.lastPaid} nextDue=${rb.nextDue}`
+        `   - ${recurring.title}: amounts=${JSON.stringify(recurring.amounts)} avg=${recurring.averageAmount} latest=${recurring.latestAmount} lastPaid=${recurring.lastPaid} nextDue=${recurring.nextDue}`
       );
     }
   }
+};
 
-  if (dryRun) {
-    console.log("\n--- Dry run preview ---");
-    console.log(
-      JSON.stringify(
-        {
-          loans: loans.slice(0, 3),
-          recurrings: recurrings.slice(0, 5),
-          txns: txns.slice(0, 5),
-        },
-        null,
-        2
-      )
-    );
-    return;
-  }
-
-  let finalBackup: any = {
-    app: "pebble",
-    deviceId: "local",
-    exportedAt: new Date().toISOString(),
-    loans,
-    promises: [],
-    recurrings,
-    settings: {
-      budgets: {},
-      currency: "₹",
-      expectedSalary: salaryHints.length
-        ? round2(salaryHints.reduce((a, b) => a + b, 0) / salaryHints.length)
-        : 0,
-      incomeAcks: {},
-      lastBackupAt: "",
-      name: "Friend",
-      payday: 1,
-    },
-    transactions: txns,
-    version: 2,
-  };
-
-  if (mergePath) {
-    if (!existsSync(mergePath)) {
-      console.error(`❌ Merge file not found: ${mergePath}`);
-      process.exit(1);
-    }
-    console.log(`\n🔗 Merging with ${mergePath}...`);
-    const existingRaw = await readFile(mergePath, "utf-8");
-    const existing = JSON.parse(existingRaw);
-    const existingTxns = existing.transactions || [];
-    const existingLoans = existing.loans || [];
-    const existingRec = existing.recurrings || [];
-
-    const seenTxn = new Set(
-      existingTxns.map(
-        (t: any) => `${t.date}|${t.amount}|${t.note.slice(0, 50)}`
-      )
-    );
-    let addedTxn = 0;
-    for (const t of txns) {
-      const key = `${t.date}|${t.amount}|${t.note.slice(0, 50)}`;
-      if (!seenTxn.has(key)) {
-        existingTxns.push(t);
-        seenTxn.add(key);
-        addedTxn++;
-      }
-    }
-
-    const seenLoan = new Set(
-      existingLoans.map((l: any) => `${l.date}|${l.amount}|${l.person}`)
-    );
-    let addedLoan = 0;
-    for (const l of loans) {
-      const key = `${l.date}|${l.amount}|${l.person}`;
-      if (!seenLoan.has(key)) {
-        existingLoans.push(l);
-        seenLoan.add(key);
-        addedLoan++;
-      }
-    }
-
-    // Variable bill aware merge: dedup by title only, not title+amount - ponytail: reuse normalize, stdlib
-    const seenRec = new Map<string, number>();
-    existingRec.forEach((r: any, idx: number) => {
-      const k = r.title.toLowerCase().replaceAll(/\s+/g, " ").trim();
-      seenRec.set(k, idx);
-    });
-    const isGas = (title: string) => {
-      const lower = title.toLowerCase();
-      return (
-        (lower.includes("gas") &&
-          (lower.includes("cylinder") || lower.includes("lpg"))) ||
-        lower.includes("gas cylinder")
-      );
-    };
-    const addDaysLocal = (dateStr: string, days: number) => {
-      const [y, m, d] = dateStr.split("-").map(Number);
-      const dt = new Date(y, m - 1, d + days);
-      return isoDay(dt);
-    };
-    let addedRec = 0;
-    for (const r of recurrings) {
-      const key = r.title.toLowerCase().replaceAll(/\s+/g, " ").trim();
-      if (key === "credit card bill") {
-        const ex = existingRec.find((x: any) => x.card);
-        if (ex) {
-          ex.settlements = [
-            ...(ex.settlements || []),
-            ...(r.settlements || []),
-          ].toSorted((a: any, b: any) =>
-            a.date < b.date ? -1 : a.date > b.date ? 1 : 0
-          );
-          const latestSettle = ex.settlements.at(-1);
-          const all = ex.settlements.map((s: any) => s.amount);
-          ex.amount = round2(
-            all.reduce((a: number, b: number) => a + b, 0) / all.length
-          );
-          ex.averageAmount = ex.amount;
-          ex.latestAmount = round2(latestSettle.amount);
-          ex.lastPaid = latestSettle.date;
-          ex.nextDue = addMonths(ex.lastPaid, 1);
-          ex.occurrences = all.length;
-          ex.amounts = [...all];
-        } else {
-          existingRec.push(r);
-          addedRec++;
-        }
-        continue;
-      }
-      if (seenRec.has(key)) {
-        const idx = seenRec.get(key)!;
-        const ex = existingRec[idx];
-        // Merge and sort by date to get correct latest - fixes gas cylinder showing Mar 6 instead of Sep 3
-        const allAmounts = [
-          ...(ex.amounts || [ex.amount]),
-          ...(r.amounts || [r.amount]),
-        ];
-        const allDates = [ex.lastPaid, r.lastPaid]
-          .filter(Boolean)
-          .toSorted((a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0));
-        const latestDate = allDates.at(-1) || ex.lastPaid || r.lastPaid;
-        const avg =
-          allAmounts.reduce((a: number, b: number) => a + b, 0) /
-          allAmounts.length;
-        const latestAmt =
-          latestDate === r.lastPaid
-            ? r.latestAmount
-            : latestDate === ex.lastPaid
-              ? ex.latestAmount
-              : r.latestAmount;
-        ex.amounts = allAmounts;
-        ex.averageAmount = round2(avg);
-        ex.amount = round2(avg);
-        ex.latestAmount = round2(latestAmt ?? r.latestAmount);
-        ex.lastPaid = latestDate;
-        ex.occurrences = allAmounts.length;
-        const variable =
-          isGas(ex.title) ||
-          isGas(r.title) ||
-          ex.frequency === "variable" ||
-          r.frequency === "variable";
-        ex.frequency = variable ? "variable" : ex.frequency;
-        ex.nextDue = variable
-          ? addDaysLocal(latestDate, 50)
-          : addMonths(latestDate, 1);
-      } else {
-        existingRec.push(r);
-        seenRec.set(key, existingRec.length - 1);
-        addedRec++;
-      }
-    }
-
-    finalBackup = {
-      ...existing,
-      app: "pebble",
-      exportedAt: new Date().toISOString(),
-      loans: existingLoans,
-      recurrings: existingRec,
-      transactions: existingTxns,
-      version: 2,
-    };
-    console.log(
-      `✅ Added ${addedTxn} txns, ${addedLoan} loans, ${addedRec} recurrings (variable bills merged by title)`
-    );
-  }
-
-  await writeFile(outPath, JSON.stringify(finalBackup, null, 2), "utf-8");
-  console.log(`\n✅ Wrote to ${outPath}`);
+const printDryRun = (result: ConvertResult): void => {
+  console.log("\n--- Dry run preview ---");
   console.log(
-    `   - ${finalBackup.transactions.length} txns, ${finalBackup.loans.length} loans, ${finalBackup.recurrings.length} bills`
-  );
-  console.log(`   Import via Pebble > Care > Data > Restore from file`);
-  console.log(
-    `\nponytail: variable bills dedup by title, avg/latest tracking, Health mapping, reuse parser`
+    JSON.stringify(
+      {
+        loans: result.loans.slice(0, 3),
+        recurrings: result.recurrings.slice(0, 5),
+        txns: result.txns.slice(0, 5),
+      },
+      null,
+      2
+    )
   );
 };
 
-main().catch((error) => {
+const transactionDedupeKey = (transaction: Txn): string =>
+  `${transaction.date}|${transaction.amount}|${transaction.note.slice(0, 50)}`;
+
+const loanDedupeKey = (loan: Loan): string =>
+  `${loan.date}|${loan.amount}|${loan.person}`;
+
+const mergeCardSettlements = (
+  existing: Recurring,
+  incoming: Recurring
+): void => {
+  const settlements = [
+    ...(existing.settlements ?? []),
+    ...(incoming.settlements ?? []),
+  ].toSorted((first, second) => compareDateStrings(first.date, second.date));
+  const latestSettlement = settlements.at(-1);
+  if (!latestSettlement) {
+    return;
+  }
+  const amounts = settlements.map((settlement) => settlement.amount);
+  const mean = round2(average(amounts));
+  existing.settlements = settlements;
+  existing.amount = mean;
+  existing.averageAmount = mean;
+  existing.latestAmount = round2(latestSettlement.amount);
+  existing.lastPaid = latestSettlement.date;
+  existing.nextDue = addMonths(latestSettlement.date, 1);
+  existing.occurrences = amounts.length;
+  existing.amounts = [...amounts];
+};
+
+const mergeRecurringHistory = (
+  existing: Recurring,
+  incoming: Recurring
+): void => {
+  const allAmounts = [
+    ...(existing.amounts ?? [existing.amount]),
+    ...(incoming.amounts ?? [incoming.amount]),
+  ];
+  const { lastPaid: existingLastPaid, latestAmount: existingLatestAmount } =
+    existing;
+  const { lastPaid: incomingLastPaid, latestAmount: incomingLatestAmount } =
+    incoming;
+  const allDates = [existingLastPaid, incomingLastPaid]
+    .filter((date) => date.length > 0)
+    .toSorted(compareDateStrings);
+  const latestDate = allDates.at(-1) ?? existingLastPaid ?? incomingLastPaid;
+  const mean = round2(average(allAmounts));
+  let latestAmount = incomingLatestAmount;
+  if (latestDate !== incomingLastPaid && latestDate === existingLastPaid) {
+    latestAmount = existingLatestAmount;
+  }
+
+  existing.amounts = allAmounts;
+  existing.averageAmount = mean;
+  existing.amount = mean;
+  existing.latestAmount = round2(
+    latestAmount ?? incomingLatestAmount ?? incoming.amount
+  );
+  existing.lastPaid = latestDate;
+  existing.occurrences = allAmounts.length;
+
+  const isVariable =
+    isGasCylinder(existing.title) ||
+    isGasCylinder(incoming.title) ||
+    existing.frequency === "variable" ||
+    incoming.frequency === "variable";
+  if (isVariable) {
+    existing.frequency = "variable";
+    existing.nextDue = addDays(latestDate, 50);
+  } else {
+    existing.nextDue = addMonths(latestDate, 1);
+  }
+};
+
+const mergeTransactions = (existing: Txn[], incoming: Txn[]): number => {
+  const seen = new Set(existing.map(transactionDedupeKey));
+  let added = 0;
+  for (const transaction of incoming) {
+    const key = transactionDedupeKey(transaction);
+    if (!seen.has(key)) {
+      existing.push(transaction);
+      seen.add(key);
+      added += 1;
+    }
+  }
+  return added;
+};
+
+const mergeLoans = (existing: Loan[], incoming: Loan[]): number => {
+  const seen = new Set(existing.map(loanDedupeKey));
+  let added = 0;
+  for (const loan of incoming) {
+    const key = loanDedupeKey(loan);
+    if (!seen.has(key)) {
+      existing.push(loan);
+      seen.add(key);
+      added += 1;
+    }
+  }
+  return added;
+};
+
+const mergeRecurringRecords = (
+  existing: Recurring[],
+  incoming: Recurring[]
+): number => {
+  const indexes = new Map<string, number>();
+  for (const [index, recurring] of existing.entries()) {
+    indexes.set(normalizeMergeTitle(recurring.title), index);
+  }
+
+  let added = 0;
+  for (const recurring of incoming) {
+    const key = normalizeMergeTitle(recurring.title);
+    if (key === "credit card bill") {
+      const cardBill = existing.find((entry) => entry.card);
+      if (cardBill) {
+        mergeCardSettlements(cardBill, recurring);
+      } else {
+        existing.push(recurring);
+        added += 1;
+      }
+    } else {
+      const index = indexes.get(key);
+      const match = index === undefined ? undefined : existing[index];
+      if (match) {
+        mergeRecurringHistory(match, recurring);
+      } else {
+        existing.push(recurring);
+        indexes.set(key, existing.length - 1);
+        added += 1;
+      }
+    }
+  }
+  return added;
+};
+
+const mergeBackups = async (
+  result: ConvertResult,
+  mergePath: string
+): Promise<BackupFile> => {
+  if (!existsSync(mergePath)) {
+    throw new Error(`Merge file not found: ${mergePath}`);
+  }
+  console.log(`\n🔗 Merging with ${mergePath}...`);
+  const existingRaw = await readTextFile(mergePath, "utf-8");
+  const existing = parseBackup(existingRaw);
+  const addedTransactions = mergeTransactions(
+    existing.transactions,
+    result.txns
+  );
+  const addedLoans = mergeLoans(existing.loans, result.loans);
+  const addedRecurrings = mergeRecurringRecords(
+    existing.recurrings,
+    result.recurrings
+  );
+
+  console.log(
+    `✅ Added ${addedTransactions} txns, ${addedLoans} loans, ${addedRecurrings} recurrings (variable bills merged by title)`
+  );
+  return {
+    ...existing,
+    app: "pebble",
+    exportedAt: new Date().toISOString(),
+    loans: existing.loans,
+    recurrings: existing.recurrings,
+    transactions: existing.transactions,
+    version: 2,
+  };
+};
+
+interface CliOptions {
+  excelPath: string;
+  outPath: string;
+  mergePath: string | null;
+  dryRun: boolean;
+  showHelp: boolean;
+}
+
+const parseCliOptions = (args: string[]): CliOptions => {
+  const [excelPath = ""] = args;
+  const outIndex = args.indexOf("--out");
+  const mergeIndex = args.indexOf("--merge");
+  const outArgument = outIndex === -1 ? undefined : args[outIndex + 1];
+  const mergeArgument = mergeIndex === -1 ? undefined : args[mergeIndex + 1];
+  const outPath =
+    outArgument && !outArgument.startsWith("--")
+      ? outArgument
+      : `pebble-import-${isoDay(new Date())}.json`;
+  const mergePath =
+    mergeArgument && !mergeArgument.startsWith("--") ? mergeArgument : null;
+  return {
+    dryRun: args.includes("--dry-run"),
+    excelPath,
+    mergePath,
+    outPath,
+    showHelp:
+      args.length === 0 || args.includes("--help") || args.includes("-h"),
+  };
+};
+
+interface ExcelWorkbookRows {
+  rows: RawRow[];
+  sheetName: string;
+}
+
+const readExcelRows = (excelPath: string): ExcelWorkbookRows => {
+  const workbook = readWorkbook(excelPath);
+  const [sheetName] = workbook.SheetNames;
+  if (!sheetName) {
+    throw new Error("No sheets");
+  }
+  const sheet = workbook.Sheets[sheetName];
+  return {
+    rows: utils.sheet_to_json<RawRow>(sheet, { defval: "" }),
+    sheetName,
+  };
+};
+
+const main = async (): Promise<void> => {
+  const options = parseCliOptions(process.argv.slice(2));
+  if (options.showHelp) {
+    printHelp();
+    return;
+  }
+  if (!existsSync(options.excelPath)) {
+    throw new Error(`File not found: ${options.excelPath}`);
+  }
+
+  console.log(`📖 Reading ${options.excelPath}...`);
+  const { rows, sheetName } = readExcelRows(options.excelPath);
+  console.log(`📄 ${rows.length} rows in "${sheetName}"`);
+  const result = convertRows(rows);
+  printConversionSummary(result);
+
+  if (options.dryRun) {
+    printDryRun(result);
+    return;
+  }
+
+  let finalBackup = makeInitialBackup(result);
+  if (options.mergePath) {
+    finalBackup = await mergeBackups(result, options.mergePath);
+  }
+  await writeFile(
+    options.outPath,
+    JSON.stringify(finalBackup, null, 2),
+    "utf-8"
+  );
+  console.log(`\n✅ Wrote to ${options.outPath}`);
+  console.log(
+    `   - ${finalBackup.transactions.length} txns, ${finalBackup.loans.length} loans, ${finalBackup.recurrings.length} bills`
+  );
+  console.log("   Import via Pebble > Care > Data > Restore from file");
+  console.log(
+    "\nponytail: variable bills dedup by title, avg/latest tracking, Health mapping, reuse parser"
+  );
+};
+
+try {
+  await main();
+} catch (error) {
   console.error("❌", error);
-  process.exit(1);
-});
+  process.exitCode = 1;
+}

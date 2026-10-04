@@ -30,6 +30,16 @@ export const pad = (n: number): string => (n < 10 ? `0${n}` : `${n}`);
 export const isoDay = (d: Date): string =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
+export const compareDateStrings = (a: string, b: string): number => {
+  if (a < b) {
+    return -1;
+  }
+  if (a > b) {
+    return 1;
+  }
+  return 0;
+};
+
 export const parseDay = (s: string): Date => {
   const [y, m, d] = (s || "").split("-").map(Number);
   if (!y || !m || !d) {

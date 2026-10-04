@@ -1,5 +1,6 @@
 import { BellRing } from "lucide-react";
 
+import { useNow } from "../hooks/use-now";
 import { diffDays, greeting, isoDay, money, monthKey } from "../lib/format";
 import { computeMilestones } from "../lib/milestones";
 import { isOverdue } from "../lib/recurring";
@@ -46,7 +47,7 @@ const Dashboard = ({
   onSnooze: () => void;
   onPromiseSettled: (uid: string) => void;
 }) => {
-  const now = new Date();
+  const now = useNow();
   const today = isoDay(now);
   const mk = monthKey(today);
   const monthTx = txns.filter((t) => monthKey(t.date) === mk);
@@ -76,12 +77,14 @@ const Dashboard = ({
   const dismissedSet = new Set(dismissed);
   const visible = insights.filter((i) => !dismissedSet.has(i.id));
   const unread = visible.length;
-  const intro =
-    txns.length === 0
-      ? "I'm Pebble - I'll quietly keep an eye on things."
-      : left >= 0
-        ? `Calm so far - ${money(left, settings.currency)} still with you this month.`
-        : "A little over the line this month - we'll figure it out together.";
+  let intro: string;
+  if (txns.length === 0) {
+    intro = "I'm Pebble - I'll quietly keep an eye on things.";
+  } else if (left >= 0) {
+    intro = `Calm so far - ${money(left, settings.currency)} still with you this month.`;
+  } else {
+    intro = "A little over the line this month - we'll figure it out together.";
+  }
 
   return (
     <div className="space-y-5">

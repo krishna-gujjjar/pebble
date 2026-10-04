@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { useNow } from "../hooks/use-now";
 import { CARD } from "../lib/card";
 import { addMonths, monthKey } from "../lib/format";
 import type { Period } from "../lib/period";
@@ -22,7 +23,7 @@ const Reports = ({
   recurrings: Recurring[];
   currency: string;
 }) => {
-  const now = new Date();
+  const now = useNow();
   const [period, setPeriod] = useState<Period>("month");
   const [offset, setOffset] = useState(0);
   const range = rangeFor(period, now, offset);

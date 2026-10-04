@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { useNow } from "../hooks/use-now";
 import { money } from "../lib/format";
 import type { Period } from "../lib/period";
 import { rangeFor, rangeTxns, totalsFor } from "../lib/period";
@@ -41,7 +42,7 @@ const InsightPeriods = ({
   txns: Txn[];
   settings: Settings;
 }) => {
-  const now = new Date();
+  const now = useNow();
   const [period, setPeriod] = useState<Period>("month");
   const [offset, setOffset] = useState(0);
   const ranges = [];

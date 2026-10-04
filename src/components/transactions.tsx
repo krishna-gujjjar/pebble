@@ -7,9 +7,9 @@ import {
   Smartphone,
   Trash2,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { money, prettyDate } from "../lib/format";
+import { compareDateStrings, money, prettyDate } from "../lib/format";
 import type { Kind, Txn } from "../lib/types";
 import { Card, Empty, Pill } from "./ui";
 
@@ -30,20 +30,205 @@ const kindIcon = (kind: Kind, payment: string) => {
   );
 };
 
-const categoryColor: Record<string, string> = {
-  Dining: "bg-[#fff3e0] text-[#ef6c00]",
-  Education: "bg-[#ede7f6] text-[#4527a0]",
-  Fun: "bg-[#e8eaf6] text-[#283593]",
-  Groceries: "bg-[#e8f5e9] text-[#2e7d32]",
-  Health: "bg-[#ffebee] text-[#d32f2f]",
-  Other: "bg-[#f5f5f5] text-[#616161]",
-  Rent: "bg-[#fce4ec] text-[#c2185b]",
-  Salary: "bg-[#e8f5e9] text-[#1b5e20]",
-  Shopping: "bg-[#fff8e1] text-[#f9a825]",
-  Subscriptions: "bg-[#f3e5f5] text-[#7b1fa2]",
-  Transport: "bg-[#e3f2fd] text-[#1565c0]",
-  Travel: "bg-[#e1f5fe] text-[#0277bd]",
-  Utilities: "bg-[#e0f2f1] text-[#00695c]",
+const OTHER_CATEGORY_COLOR = "bg-[#f5f5f5] text-[#616161]";
+const categoryColors = new Map<string, string>([
+  ["Dining", "bg-[#fff3e0] text-[#ef6c00]"],
+  ["Education", "bg-[#ede7f6] text-[#4527a0]"],
+  ["Fun", "bg-[#e8eaf6] text-[#283593]"],
+  ["Groceries", "bg-[#e8f5e9] text-[#2e7d32]"],
+  ["Health", "bg-[#ffebee] text-[#d32f2f]"],
+  ["Other", OTHER_CATEGORY_COLOR],
+  ["Rent", "bg-[#fce4ec] text-[#c2185b]"],
+  ["Salary", "bg-[#e8f5e9] text-[#1b5e20]"],
+  ["Shopping", "bg-[#fff8e1] text-[#f9a825]"],
+  ["Subscriptions", "bg-[#f3e5f5] text-[#7b1fa2]"],
+  ["Transport", "bg-[#e3f2fd] text-[#1565c0]"],
+  ["Travel", "bg-[#e1f5fe] text-[#0277bd]"],
+  ["Utilities", "bg-[#e0f2f1] text-[#00695c]"],
+]);
+
+const categoryColorFor = (category: string): string =>
+  categoryColors.get(category) ?? OTHER_CATEGORY_COLOR;
+
+const TransactionRow = ({
+  txn,
+  currency,
+  isSelected,
+  onSelect,
+}: {
+  txn: Txn;
+  currency: string;
+  isSelected: boolean;
+  onSelect: () => void;
+}) => (
+  <button
+    type="button"
+    aria-pressed={isSelected}
+    onClick={onSelect}
+    className={`flex w-full cursor-pointer items-center gap-3 border-0 px-4 py-3.5 text-left font-[inherit] transition-colors focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#1e4d3a] ${isSelected ? "bg-[#fbf7ea]" : "bg-transparent hover:bg-[#faf7ef]"}`}
+  >
+    <span
+      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${txn.kind === "income" ? "bg-[#eef5ec] text-[#1e4d3a]" : "bg-[#f6f2e8] text-[#5b6b60]"}`}
+    >
+      {kindIcon(txn.kind, txn.payment)}
+    </span>
+    <span className="min-w-0 flex-1">
+      <span className="block truncate text-[14.5px] font-medium text-[#1c2b23]">
+        {txn.note || txn.category}
+      </span>
+      <span className="mt-1 flex items-center gap-1.5">
+        <span
+          className={`rounded-full px-2 py-0.5 text-[12px] font-medium ${categoryColorFor(txn.category)}`}
+        >
+          {txn.category}
+        </span>
+        {txn.payment ? (
+          <span className="text-[12px] text-[#8a978d]">· {txn.payment}</span>
+        ) : null}
+        {txn.loanUid ? (
+          <span className="rounded-full bg-[#e8eaf6] px-1.5 py-0.5 text-[12px] text-[#3949ab]">
+            Loan
+          </span>
+        ) : null}
+      </span>
+    </span>
+    <span className="shrink-0 text-right">
+      <span
+        className={`font-display block text-[15.5px] font-bold ${txn.kind === "income" ? "text-[#1e4d3a]" : "text-[#1c2b23]"}`}
+      >
+        {txn.kind === "income" ? "+" : "−"}
+        {money(txn.amount, currency).replace("−", "")}
+      </span>
+      <span className="mt-0.5 block text-[12px] text-[#8a978d]">
+        {prettyDate(txn.date)}
+      </span>
+    </span>
+  </button>
+);
+
+const TransactionDetailSheet = ({
+  transaction,
+  currency,
+  confirmingDelete,
+  onClose,
+  onEdit,
+  onAskDelete,
+  onCancelDelete,
+  onConfirmDelete,
+}: {
+  transaction: Txn;
+  currency: string;
+  confirmingDelete: boolean;
+  onClose: () => void;
+  onEdit: (transaction: Txn) => void;
+  onAskDelete: () => void;
+  onCancelDelete: () => void;
+  onConfirmDelete: () => void;
+}) => {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || dialog.open) {
+      return;
+    }
+    dialog.showModal();
+    return () => dialog.close();
+  }, []);
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="fixed inset-0 z-50 m-0 flex h-full w-full max-w-none items-end justify-center border-0 bg-transparent p-0 backdrop:bg-[#1c2b23]/40 sm:items-center sm:p-4"
+      aria-label="Transaction details"
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+    >
+      <div className="animate-in slide-in-from-bottom relative w-full max-w-[520px] rounded-t-[28px] bg-[#faf7ef] p-5 pb-8 sm:rounded-[28px]">
+        <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-[#1c2b23]/15" />
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="font-display text-[20px] font-bold text-[#1c2b23]">
+              {transaction.note}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <span
+                className={`rounded-full px-2.5 py-1 text-[12px] font-medium ${categoryColorFor(transaction.category)}`}
+              >
+                {transaction.category}
+              </span>
+              <span className="rounded-full bg-white px-2.5 py-1 text-[12px] ring-1 ring-[#1c2b23]/10">
+                {transaction.payment} · {transaction.kind}
+              </span>
+              <span className="rounded-full bg-white px-2.5 py-1 text-[12px] ring-1 ring-[#1c2b23]/10">
+                {prettyDate(transaction.date)}
+              </span>
+            </div>
+          </div>
+          <p
+            className={`font-display text-[24px] font-bold ${transaction.kind === "income" ? "text-[#1e4d3a]" : "text-[#1c2b23]"}`}
+          >
+            {transaction.kind === "income" ? "+" : "−"}
+            {money(transaction.amount, currency).replace("−", "")}
+          </p>
+        </div>
+        <div className="mt-5 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              onEdit(transaction);
+              onClose();
+            }}
+            className="rounded-2xl bg-[#1c2b23] py-3 text-[14px] font-semibold text-[#f7f4ec]"
+          >
+            Edit entry
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-2xl bg-white py-3 text-[14px] font-medium ring-1 ring-[#1c2b23]/10"
+          >
+            Close
+          </button>
+        </div>
+        <div className="mt-3">
+          {confirmingDelete ? (
+            <div className="rounded-2xl bg-[#fbeedf] p-3">
+              <p className="text-[13px] font-medium text-[#8a4b12]">
+                Delete this entry? This cannot be undone.
+              </p>
+              <div className="mt-2.5 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={onConfirmDelete}
+                  className="rounded-xl bg-[#b3541e] py-2.5 text-[13px] font-semibold text-white"
+                >
+                  Yes, delete
+                </button>
+                <button
+                  type="button"
+                  onClick={onCancelDelete}
+                  className="rounded-xl bg-white py-2.5 text-[13px] font-medium ring-1 ring-[#1c2b23]/10"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onAskDelete}
+              className="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-white py-3 text-[13px] font-medium text-[#8a978d] ring-1 ring-[#1c2b23]/10"
+            >
+              <Trash2 size={14} /> Delete entry
+            </button>
+          )}
+        </div>
+      </div>
+    </dialog>
+  );
 };
 
 const Transactions = ({
@@ -93,7 +278,7 @@ const Transactions = ({
   const list = useMemo(
     () =>
       [...filtered]
-        .toSorted((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+        .toSorted((a, b) => compareDateStrings(b.date, a.date))
         .slice(0, 200),
     [filtered]
   );
@@ -167,7 +352,7 @@ const Transactions = ({
             <button
               type="button"
               onClick={() => setQ("")}
-              className="rounded-full bg-[#f7f4ec]/15 px-2 py-0.5 text-[11px] text-[#f7f4ec]"
+              className="rounded-full bg-[#f7f4ec]/15 px-2 py-0.5 text-[12px] text-[#f7f4ec]"
             >
               Clear
             </button>
@@ -260,7 +445,7 @@ const Transactions = ({
                 <p className="text-[13px] font-semibold text-[#1c2b23]">
                   {prettyDate(date)}
                 </p>
-                <div className="flex gap-2 text-[11.5px]">
+                <div className="flex gap-2 text-[12px]">
                   {dayExp > 0 ? (
                     <span className="rounded-full bg-[#f6f2e8] px-2 py-0.5 text-[#8a6b4a]">
                       {money(dayExp, currency)} out
@@ -274,57 +459,17 @@ const Transactions = ({
                 </div>
               </div>
               <Card className="divide-y divide-[#1c2b23]/6 overflow-hidden">
-                {items.map((t) => {
-                  const isSelected = selectedUid === t.uid;
-                  const catStyle =
-                    categoryColor[t.category] || categoryColor.Other;
-                  return (
-                    <div
-                      key={t.uid}
-                      onClick={() => setSelectedUid(isSelected ? null : t.uid)}
-                      className={`flex items-center gap-3 px-4 py-3.5 transition-colors ${isSelected ? "bg-[#fbf7ea]" : "hover:bg-[#faf7ef]"} cursor-pointer`}
-                    >
-                      <span
-                        className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${t.kind === "income" ? "bg-[#eef5ec] text-[#1e4d3a]" : "bg-[#f6f2e8] text-[#5b6b60]"}`}
-                      >
-                        {kindIcon(t.kind, t.payment)}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-[14.5px] font-medium text-[#1c2b23]">
-                          {t.note || t.category}
-                        </p>
-                        <div className="mt-1 flex items-center gap-1.5">
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-[10.5px] font-medium ${catStyle}`}
-                          >
-                            {t.category}
-                          </span>
-                          {t.payment ? (
-                            <span className="text-[11px] text-[#8a978d]">
-                              · {t.payment}
-                            </span>
-                          ) : null}
-                          {t.loanUid ? (
-                            <span className="rounded-full bg-[#e8eaf6] px-1.5 py-0.5 text-[10px] text-[#3949ab]">
-                              Loan
-                            </span>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="shrink-0 text-right">
-                        <p
-                          className={`font-display text-[15.5px] font-bold ${t.kind === "income" ? "text-[#1e4d3a]" : "text-[#1c2b23]"}`}
-                        >
-                          {t.kind === "income" ? "+" : "−"}
-                          {money(t.amount, currency).replace("−", "")}
-                        </p>
-                        <p className="mt-0.5 text-[11px] text-[#8a978d]">
-                          {prettyDate(t.date)}
-                        </p>
-                      </div>
-                    </div>
-                  );
-                })}
+                {items.map((txn) => (
+                  <TransactionRow
+                    key={txn.uid}
+                    txn={txn}
+                    currency={currency}
+                    isSelected={selectedUid === txn.uid}
+                    onSelect={() =>
+                      setSelectedUid(selectedUid === txn.uid ? null : txn.uid)
+                    }
+                  />
+                ))}
               </Card>
             </div>
           );
@@ -336,99 +481,21 @@ const Transactions = ({
         </p>
       ) : null}
 
-      {/* Detail bottom sheet for selected txn - now with delete */}
       {selected ? (
-        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
-          <div
-            className="absolute inset-0 bg-[#1c2b23]/40"
-            onClick={() => setSelectedUid(null)}
-          />
-          <div className="animate-in slide-in-from-bottom relative w-full max-w-[520px] rounded-t-[28px] bg-[#faf7ef] p-5 pb-8 sm:rounded-[28px]">
-            <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-[#1c2b23]/15" />
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="font-display text-[20px] font-bold text-[#1c2b23]">
-                  {selected.note}
-                </p>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  <span
-                    className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${categoryColor[selected.category] || categoryColor.Other}`}
-                  >
-                    {selected.category}
-                  </span>
-                  <span className="rounded-full bg-white px-2.5 py-1 text-[11px] ring-1 ring-[#1c2b23]/10">
-                    {selected.payment} · {selected.kind}
-                  </span>
-                  <span className="rounded-full bg-white px-2.5 py-1 text-[11px] ring-1 ring-[#1c2b23]/10">
-                    {prettyDate(selected.date)}
-                  </span>
-                </div>
-              </div>
-              <p
-                className={`font-display text-[24px] font-bold ${selected.kind === "income" ? "text-[#1e4d3a]" : "text-[#1c2b23]"}`}
-              >
-                {selected.kind === "income" ? "+" : "−"}
-                {money(selected.amount, currency).replace("−", "")}
-              </p>
-            </div>
-            <div className="mt-5 grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  onEdit(selected);
-                  setSelectedUid(null);
-                }}
-                className="rounded-2xl bg-[#1c2b23] py-3 text-[14px] font-semibold text-[#f7f4ec]"
-              >
-                Edit entry
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedUid(null)}
-                className="rounded-2xl bg-white py-3 text-[14px] font-medium ring-1 ring-[#1c2b23]/10"
-              >
-                Close
-              </button>
-            </div>
-            <div className="mt-3">
-              {confirmUid === selected.uid ? (
-                <div className="rounded-2xl bg-[#fbeedf] p-3">
-                  <p className="text-[13px] font-medium text-[#8a4b12]">
-                    Delete this entry? This cannot be undone.
-                  </p>
-                  <div className="mt-2.5 grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onDelete(selected.uid);
-                        setConfirmUid("");
-                        setSelectedUid(null);
-                      }}
-                      className="rounded-xl bg-[#b3541e] py-2.5 text-[13px] font-semibold text-white"
-                    >
-                      Yes, delete
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setConfirmUid("")}
-                      className="rounded-xl bg-white py-2.5 text-[13px] font-medium ring-1 ring-[#1c2b23]/10"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setConfirmUid(selected.uid)}
-                  className="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-white py-3 text-[13px] font-medium text-[#8a978d] ring-1 ring-[#1c2b23]/10"
-                >
-                  <Trash2 size={14} /> Delete entry
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        <TransactionDetailSheet
+          transaction={selected}
+          currency={currency}
+          confirmingDelete={confirmUid === selected.uid}
+          onClose={() => setSelectedUid(null)}
+          onEdit={onEdit}
+          onAskDelete={() => setConfirmUid(selected.uid)}
+          onCancelDelete={() => setConfirmUid("")}
+          onConfirmDelete={() => {
+            onDelete(selected.uid);
+            setConfirmUid("");
+            setSelectedUid(null);
+          }}
+        />
       ) : null}
     </div>
   );

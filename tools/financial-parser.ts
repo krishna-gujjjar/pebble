@@ -76,10 +76,10 @@ const SALARY_KEYWORDS = [
   "KRISCENT TECHNO",
   "TECHNO",
 ];
-const LENDING_PERSON_PATTERN = /^[A-Z][A-Z\s.]{2,30}$/;
+const LENDING_PERSON_PATTERN = /^[A-Z][A-Z\s.]{2,30}$/u;
 
 // Health & Medical specific rules per user spec
-const HEALTH_DOCTOR_PREFIX = /^\s*DR[\s.]/i;
+const HEALTH_DOCTOR_PREFIX = /^\s*DR[\s.]/iu;
 const HEALTH_BODY_PARTS = [
   "DIABETES",
   "DENTAL",
@@ -128,7 +128,7 @@ const HEALTH_SUFFIX_KEYWORDS = [
   "HOSPITAL",
 ];
 
-const CATEGORY_KEYWORDS: Record<string, string[]> = {
+const CATEGORY_KEYWORDS = {
   Business: ["business", "techno", "kriscent", "deposit", "neft"],
   Dining: [
     "zomato",
@@ -262,30 +262,145 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     "bijli",
     "current bill",
   ],
+} as const satisfies Record<string, readonly string[]>;
+
+const HEALTH_CATEGORY = "Health & Medical";
+const DOCTOR_CONSULTATION_CATEGORY = "Health & Medical (Doctor Consultation)";
+const OTHER_CATEGORY = "Other";
+const SALARY_CATEGORY = "Salary";
+const BUSINESS_CATEGORY = "Business";
+const HEALTH_KEYWORD_CATEGORY = "Health";
+const INCOME_CATEGORY_NAMES = new Set([
+  BUSINESS_CATEGORY,
+  "Freelance",
+  "Interest",
+  "Gift",
+  "Refund",
+]);
+const EXPENSE_CATEGORY_NAMES = new Set([
+  "Groceries",
+  "Dining",
+  "Transport",
+  "Rent",
+  "Utilities",
+  "Subscriptions",
+  "Shopping",
+  HEALTH_KEYWORD_CATEGORY,
+  "Fun",
+  "Travel",
+  "Education",
+  OTHER_CATEGORY,
+]);
+const GENERIC_HEALTH_SUFFIX_KEYWORDS = new Set([
+  "MEDICAL",
+  "PHARMA",
+  "HEALTHCARE",
+  "CLINIC",
+  "HOSPITAL",
+]);
+
+interface TextToken {
+  end: number;
+  start: number;
+  value: string;
+}
+
+const tokenizeWhitespace = (text: string): TextToken[] => {
+  const tokens: TextToken[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    while (/\s/u.test(text[cursor] ?? "")) {
+      cursor += 1;
+    }
+    const start = cursor;
+    while (cursor < text.length && !/\s/u.test(text[cursor] ?? "")) {
+      cursor += 1;
+    }
+    if (start < cursor) {
+      tokens.push({
+        end: cursor,
+        start,
+        value: text.slice(start, cursor),
+      });
+    }
+  }
+  return tokens;
+};
+
+const isAccountReferenceToken = (
+  token: string,
+  requireMask = false
+): boolean => {
+  let hasDigit = false;
+  let hasMask = false;
+  for (const character of token.toUpperCase()) {
+    if (character >= "0" && character <= "9") {
+      if (hasMask) {
+        return false;
+      }
+      hasDigit = true;
+    } else if (character === "X" && hasDigit) {
+      hasMask = true;
+    } else {
+      return false;
+    }
+  }
+  return hasDigit && (!requireMask || hasMask);
+};
+
+const findLocationMarkerIndex = (tokens: TextToken[]): number => {
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    const token = tokens[index];
+    const followingToken = tokens[index + 1];
+    if (
+      token?.value.toUpperCase() === "AT" &&
+      followingToken?.value.startsWith("31254")
+    ) {
+      return index;
+    }
+  }
+  return -1;
 };
 
 const extractSuffixHandleArea = (rawInput: string): string => {
   // Get text right before location string "AT 31254..."
-  const match = rawInput.match(/^(.*)\s+(?:0+X+|\d+X+|\d+)\s+AT\s+31254/i);
-  if (match) {
-    const before = match[1];
-    // Return last 100 chars as suffix/handle area
-    return before.slice(-120);
+  const tokens = tokenizeWhitespace(rawInput);
+  let prefixEnd: number | undefined;
+  for (let index = 0; index < tokens.length - 2; index += 1) {
+    const accountToken = tokens[index];
+    const atToken = tokens[index + 1];
+    const locationToken = tokens[index + 2];
+    const hasSuffixAccount = Boolean(
+      accountToken &&
+      accountToken.start > 0 &&
+      isAccountReferenceToken(accountToken.value)
+    );
+    const hasLocationMarker =
+      atToken?.value.toUpperCase() === "AT" &&
+      Boolean(locationToken?.value.startsWith("31254"));
+    if (hasSuffixAccount && hasLocationMarker && accountToken) {
+      prefixEnd = accountToken.start - 1;
+    }
   }
+  if (prefixEnd !== undefined) {
+    return rawInput.slice(0, prefixEnd).slice(-120);
+  }
+
   // Fallback: text after last slash before AT
-  const beforeAT = rawInput.split(/AT\s+31254/i)[0] || "";
+  const locationIndex = findLocationMarkerIndex(tokens);
+  const beforeAT =
+    locationIndex === -1
+      ? rawInput
+      : rawInput.slice(0, tokens[locationIndex]?.start);
   const parts = beforeAT.split("/");
   return parts.slice(-2).join("/").slice(-100);
 };
 
 const wordBoundaryContains = (text: string, keyword: string): boolean => {
-  // Escape regex
-  const escaped = keyword.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // For very short keywords (<=3), require word boundary both sides
-  // For longer, allow prefix match but still word boundary start
+  const escaped = keyword.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   const pattern = keyword.length <= 3 ? `\\b${escaped}\\b` : `\\b${escaped}`;
   try {
-    return new RegExp(pattern, "i").test(text);
+    return new RegExp(pattern, "iu").test(text);
   } catch {
     return text.toUpperCase().includes(keyword);
   }
@@ -293,477 +408,507 @@ const wordBoundaryContains = (text: string, keyword: string): boolean => {
 
 const checkHealthMedical = (
   counterparty: string,
-  rawInput: string,
   suffixArea: string
 ): string | null => {
   const cp = counterparty.trim();
-  const cpUpper = cp.toUpperCase();
   const suffixLower = suffixArea.toLowerCase();
   const suffixUpper = suffixArea.toUpperCase();
 
-  // Rule 1: Counterparty begins with DR or DR.
   if (HEALTH_DOCTOR_PREFIX.test(cp)) {
-    return "Health & Medical (Doctor Consultation)";
+    return DOCTOR_CONSULTATION_CATEGORY;
   }
 
-  // Rule 1b: Contains medical conditions or body parts - use word boundaries to avoid PAYMENT -> ENT false positive
-  for (const cond of HEALTH_BODY_PARTS) {
-    if (wordBoundaryContains(cp, cond)) {
-      if (HEALTH_DOCTOR_PREFIX.test(cp)) {
-        return "Health & Medical (Doctor Consultation)";
-      }
-      return "Health & Medical";
+  for (const condition of HEALTH_BODY_PARTS) {
+    if (wordBoundaryContains(cp, condition)) {
+      return HEALTH_CATEGORY;
     }
   }
 
-  // Rule 1c: Transliterated health keywords - word boundary
-  for (const kw of HEALTH_TRANSLITERATED) {
-    if (wordBoundaryContains(cp, kw)) {
-      return "Health & Medical";
+  for (const keyword of HEALTH_TRANSLITERATED) {
+    if (wordBoundaryContains(cp, keyword)) {
+      return HEALTH_CATEGORY;
     }
   }
 
-  // Rule 2: Suffix/handle area contains Medi or @/dr
-  // For suffix, "Medi" as substring is allowed per spec, but avoid matching "immediate" etc? Keep substring but ensure not too generic
-  // Check explicit patterns: medi followed by word char, or @/dr
-  // Per spec: suffix/handle area right before location string contains "Medi" or "@/dr"
-  // Check for medi substring (medical, medicine, etc) - but ensure it's in handle area, not UPI prefix
-  // Also check @/dr pattern specifically
   if (suffixLower.includes("medi")) {
-    return "Health & Medical";
+    return HEALTH_CATEGORY;
   }
-  // Check for @/dr or @dr patterns (doctor handle)
   if (suffixLower.includes("@/dr") || suffixLower.includes("@dr")) {
-    return "Health & Medical";
+    return HEALTH_CATEGORY;
   }
-  // Check other medical suffix keywords but only if in handle area (after last /)
-  // Extract handle part: after last / before AT
-  const handlePart = suffixArea.split("/").pop() || suffixArea;
+
+  const handlePart = suffixArea.split("/").at(-1) || suffixArea;
   const handleUpper = handlePart.toUpperCase();
-  for (const kw of HEALTH_SUFFIX_KEYWORDS) {
-    if (kw === "MEDI" || kw === "@/DR" || kw === "@DR") {
-      continue;
-    } // already handled
-    if (handleUpper.includes(kw) || suffixUpper.includes(kw)) {
-      // For generic medical words in suffix, require word boundary to avoid false positives
-      if (
-        ["MEDICAL", "PHARMA", "HEALTHCARE", "CLINIC", "HOSPITAL"].includes(kw)
-      ) {
-        if (wordBoundaryContains(suffixArea, kw)) {
-          return "Health & Medical";
-        }
-      }
+  const matchesGenericSuffix = [...GENERIC_HEALTH_SUFFIX_KEYWORDS].some(
+    (keyword) =>
+      (handleUpper.includes(keyword) || suffixUpper.includes(keyword)) &&
+      wordBoundaryContains(suffixArea, keyword)
+  );
+  return matchesGenericSuffix ? HEALTH_CATEGORY : null;
+};
+
+const getSpecificHealthCategory = (
+  text: string,
+  counterparty: string,
+  rawInput: string
+): string | null => {
+  const suffix = extractSuffixHandleArea(rawInput);
+  const healthCategory = checkHealthMedical(counterparty, suffix);
+  if (healthCategory) {
+    return healthCategory;
+  }
+  if (HEALTH_DOCTOR_PREFIX.test(text)) {
+    return DOCTOR_CONSULTATION_CATEGORY;
+  }
+  return HEALTH_SUFFIX_KEYWORDS.some((keyword) =>
+    suffix.toUpperCase().includes(keyword)
+  )
+    ? HEALTH_CATEGORY
+    : null;
+};
+
+const getCategoryForKeywordMatch = (
+  category: string,
+  type: TransactionType,
+  lowerText: string
+): string => {
+  if (type === "INFLOW") {
+    if (category === SALARY_CATEGORY || lowerText.includes("salary")) {
+      return SALARY_CATEGORY;
+    }
+    if (INCOME_CATEGORY_NAMES.has(category)) {
+      return category;
     }
   }
 
-  return null;
+  if (EXPENSE_CATEGORY_NAMES.has(category)) {
+    if (category === HEALTH_KEYWORD_CATEGORY) {
+      return lowerText.includes("dr ") || lowerText.includes("dr.")
+        ? DOCTOR_CONSULTATION_CATEGORY
+        : HEALTH_CATEGORY;
+    }
+    return category;
+  }
+  if (category === BUSINESS_CATEGORY && type === "OUTFLOW") {
+    return OTHER_CATEGORY;
+  }
+  return category;
 };
 
 const getCategoryFromText = (
   text: string,
   type: TransactionType,
-  counterparty?: string,
-  rawInput?: string
+  counterparty: string,
+  rawInput: string
 ): string => {
-  const lower = text.toLowerCase();
-
-  // First, check Health & Medical specific rules if counterparty and raw provided
+  const lowerText = text.toLowerCase();
   if (counterparty && rawInput) {
-    const suffix = extractSuffixHandleArea(rawInput);
-    const healthCat = checkHealthMedical(counterparty, rawInput, suffix);
-    if (healthCat) {
-      return healthCat;
-    }
-    // Also check the text itself for health if it contains DR prefix
-    if (HEALTH_DOCTOR_PREFIX.test(text)) {
-      return "Health & Medical (Doctor Consultation)";
-    }
-    // Check suffix area for health even if counterparty didn't match
-    for (const kw of HEALTH_SUFFIX_KEYWORDS) {
-      if (suffix.toUpperCase().includes(kw)) {
-        return "Health & Medical";
-      }
+    const healthCategory = getSpecificHealthCategory(
+      text,
+      counterparty,
+      rawInput
+    );
+    if (healthCategory) {
+      return healthCategory;
     }
   }
 
-  // Check all categories, prefer remark first
-  for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
-    if (keywords.some((k) => lower.includes(k.toLowerCase()))) {
-      if (type === "INFLOW") {
-        if (cat === "Salary" || lower.includes("salary")) {
-          return "Salary";
-        }
-        if (
-          ["Business", "Freelance", "Interest", "Gift", "Refund"].includes(cat)
-        ) {
-          return cat;
-        }
-        if (cat === "Salary") {
-          return "Salary";
-        }
-      }
-      if (
-        [
-          "Groceries",
-          "Dining",
-          "Transport",
-          "Rent",
-          "Utilities",
-          "Subscriptions",
-          "Shopping",
-          "Health",
-          "Fun",
-          "Travel",
-          "Education",
-          "Other",
-        ].includes(cat)
-      ) {
-        // Map Health & Medical variants to Health for general, but keep detailed if doctor
-        if (cat === "Health") {
-          // Preserve detailed health categories if already detected
-          if (lower.includes("dr ") || lower.includes("dr.")) {
-            return "Health & Medical (Doctor Consultation)";
-          }
-          return "Health & Medical";
-        }
-        return cat;
-      }
-      if (cat === "Business" && type === "OUTFLOW") {
-        return "Other";
-      }
-      return cat;
+  for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+    const matchesKeyword = keywords.some((keyword) =>
+      lowerText.includes(keyword.toLowerCase())
+    );
+    if (matchesKeyword) {
+      return getCategoryForKeywordMatch(category, type, lowerText);
     }
   }
-  return "Other";
+  return OTHER_CATEGORY;
 };
 
 const cleanAccountHolder = (raw: string): string => {
-  let s = raw;
-  // Remove account holder suffix "00XXXXXXXXXXX AT 31254 KOTAH RAJ BHAWAN ROAD" or similar
-  // Pattern: optional digits/X, AT, 31254, KOTAH ... ROAD
-  s = s.replaceAll(/\s*0+X+\s+AT\s+31254\s+KOTAH.*$/gi, "");
-  s = s.replaceAll(/\s*\d+X+\s+AT\s+31254\s+KOTAH.*$/gi, "");
-  s = s.replaceAll(/\s+\d+\s+AT\s+31254\s+KOTAH.*$/gi, ""); // For UPI ref number AT ...
-  s = s.replaceAll(/\s+AT\s+31254\s+KOTAH.*$/gi, ""); // Generic AT 31254...
-  s = s.replaceAll(/\s+\d+X+\s+AT\s+.*ROAD\s*$/gi, "").trim();
-  s = s.replaceAll(/\s+AT\s+.*ROAD\s*$/gi, "").trim(); // Fallback any AT ... ROAD at end
-  return s.trim();
+  const tokens = tokenizeWhitespace(raw);
+  const endsWithRoad = raw.trimEnd().toUpperCase().endsWith("ROAD");
+
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    const atToken = tokens[index];
+    const locationCode = tokens[index + 1];
+    if (
+      !atToken ||
+      atToken.value.toUpperCase() !== "AT" ||
+      atToken.start === 0
+    ) {
+      continue;
+    }
+
+    const locationName = tokens[index + 2];
+    const isKotahLocation =
+      locationCode?.value === "31254" &&
+      locationName?.value.toUpperCase().startsWith("KOTAH");
+    if (isKotahLocation) {
+      const accountToken = tokens[index - 1];
+      const removeFrom =
+        accountToken &&
+        accountToken.start > 0 &&
+        isAccountReferenceToken(accountToken.value)
+          ? accountToken.start - 1
+          : atToken.start - 1;
+      return raw.slice(0, removeFrom).trimEnd();
+    }
+
+    if (endsWithRoad) {
+      const accountToken = tokens[index - 1];
+      const removeFrom =
+        accountToken &&
+        accountToken.start > 0 &&
+        isAccountReferenceToken(accountToken.value, true)
+          ? accountToken.start - 1
+          : atToken.start - 1;
+      return raw.slice(0, removeFrom).trimEnd();
+    }
+  }
+
+  return raw.trim();
 };
 
 const stripPrefixes = (text: string): string =>
   text
-    .replaceAll(/^\s*(WDL|DEP)\s+TFR\s+/gi, "")
-    .replaceAll(/^\s*DEBIT\s+/gi, "")
+    .replaceAll(/^\s*(?:WDL|DEP)\s+TFR\s+/giu, "")
+    .replaceAll(/^\s*DEBIT\s+/giu, "")
     .trim();
 
-const extractUPI = (text: string) => {
-  // Find UPI/DR/... pattern inside text, also handle UP/DR as UPI alias (bank statements use UP)
-  const upiRegex =
-    /(?:UPI|UP)\/(DR|CR)\/([^/]+)\/([^/]+)(?:\/([^/]+))?(?:\/([^/]+))?/i;
-  const m = text.match(upiRegex);
-  if (m) {
-    // m[3] = counterparty, m[4]=bank, m[5]=remark
-    let counterparty = m[3].trim();
-    let remark = (m[5] || m[4] || "").trim();
-    // If remark is bank code, treat as empty and try to get remark from remaining text after match
-    const afterMatch = text.slice((m.index || 0) + m[0].length).trim();
-    if (
-      BANK_CODES.has(remark.toUpperCase()) ||
-      /^\d+$/.test(remark) ||
-      remark.length <= 3
-    ) {
-      // Use afterMatch as remark if it exists and not bank
-      if (
-        afterMatch &&
-        !BANK_CODES.has(afterMatch.toUpperCase().split(/\s+/)[0])
-      ) {
-        remark = afterMatch;
-      } else {
-        remark = "";
-      }
-    } else {
-      // Combine with afterMatch if present
-      if (afterMatch) {
-        remark = `${remark} ${afterMatch}`.trim();
-      }
-    }
-    // Special: if counterparty contains bank code like KKBK, it might be wrong
-    // Try to detect: if counterparty is like "RISHI ." -> good, but if it's "1XXXXXXXXXXX" it's id
-    if (
-      /^\d+X+$/.test(counterparty) ||
-      /^\d+$/.test(counterparty) ||
-      BANK_CODES.has(counterparty.toUpperCase())
-    ) {
-      counterparty = "";
-    }
-    // Clean
-    counterparty = counterparty
-      .replaceAll(/[^A-Z0-9\s.-]/gi, " ")
-      .replaceAll(/\s+/g, " ")
-      .trim();
-    remark = remark
-      .replaceAll(/[^A-Z0-9\s.-]/gi, " ")
-      .replaceAll(/\s+/g, " ")
-      .trim();
-    // If remark contains "X/cash" or "paym" or "bil" keep
-    return { bank: m[4] || "", counterparty, remark };
+interface PartyDetails {
+  bank: string;
+  counterparty: string;
+  remark: string;
+}
+
+const resolveUPIRemark = (
+  initialRemark: string,
+  afterMatch: string
+): string => {
+  const looksLikeBankOrReference =
+    BANK_CODES.has(initialRemark.toUpperCase()) ||
+    /^\d+$/u.test(initialRemark) ||
+    initialRemark.length <= 3;
+  if (looksLikeBankOrReference) {
+    const firstToken = afterMatch.toUpperCase().split(/\s+/u)[0] ?? "";
+    return afterMatch && !BANK_CODES.has(firstToken) ? afterMatch : "";
   }
-  // Fallback split method for cases like "UPI/DR/6XXX/RISHI ./KKBK/..." or "UP/DR/..."
+  return afterMatch ? `${initialRemark} ${afterMatch}`.trim() : initialRemark;
+};
+
+const isInvalidUPICounterparty = (counterparty: string): boolean =>
+  /^\d+X+$/u.test(counterparty) ||
+  /^\d+$/u.test(counterparty) ||
+  BANK_CODES.has(counterparty.toUpperCase());
+
+const cleanUPIText = (text: string): string =>
+  text
+    .replaceAll(/[^A-Z0-9\s.-]/giu, " ")
+    .replaceAll(/\s+/gu, " ")
+    .trim();
+
+const extractStructuredUPI = (
+  text: string,
+  match: RegExpMatchArray
+): PartyDetails => {
+  const {
+    counterparty: rawCounterparty = "",
+    bank = "",
+    remark: rawRemark = "",
+  } = match.groups ?? {};
+  let counterparty = rawCounterparty.trim();
+  const initialRemark = (rawRemark || bank).trim();
+  const afterMatch = text.slice((match.index ?? 0) + match[0].length).trim();
+  const remark = resolveUPIRemark(initialRemark, afterMatch);
+
+  if (isInvalidUPICounterparty(counterparty)) {
+    counterparty = "";
+  }
+  return {
+    bank,
+    counterparty: cleanUPIText(counterparty),
+    remark: cleanUPIText(remark),
+  };
+};
+
+const extractFallbackUPI = (text: string): PartyDetails | null => {
   const parts = text
     .split("/")
-    .map((p) => p.trim())
+    .map((part) => part.trim())
     .filter(Boolean);
-  const upiIdx = parts.findIndex(
-    (p) => p.toUpperCase() === "UPI" || p.toUpperCase() === "UP"
-  );
-  if (upiIdx !== -1 && parts.length >= upiIdx + 4) {
-    const counterparty = parts[upiIdx + 3].replace(/^\d+/, "").trim();
-    const remaining = parts
-      .slice(upiIdx + 4)
-      .join(" ")
-      .trim();
-    const tokens = remaining
-      .split(/\s+/)
-      .filter((t) => !BANK_CODES.has(t.toUpperCase()) && !/^\d+X+$/.test(t));
-    const remark = tokens.join(" ").trim();
-    return { bank: parts[upiIdx + 4] || "", counterparty, remark };
+  const upiIndex = parts.findIndex((part) => {
+    const upperPart = part.toUpperCase();
+    return upperPart === "UPI" || upperPart === "UP";
+  });
+  if (upiIndex === -1 || parts.length < upiIndex + 4) {
+    return null;
   }
-  return null;
+
+  const upiParts = parts.slice(upiIndex);
+  const rawCounterparty = upiParts.at(3) ?? "";
+  const bank = upiParts.at(4) ?? "";
+  const remainingParts = upiParts.slice(5);
+  const counterparty = rawCounterparty.replace(/^\d+/u, "").trim();
+  const remaining = [bank, ...remainingParts].filter(Boolean).join(" ").trim();
+  const tokens = remaining
+    .split(/\s+/u)
+    .filter(
+      (token) => !BANK_CODES.has(token.toUpperCase()) && !/^\d+X+$/u.test(token)
+    );
+  return { bank, counterparty, remark: tokens.join(" ").trim() };
 };
 
-const extractNEFT = (text: string) => {
-  // NEFT*...*...*COUNTERPARTY
-  if (text.includes("NEFT")) {
-    const parts = text
-      .split("*")
-      .map((p) => p.trim())
-      .filter(Boolean);
-    const last = parts.at(-1);
-    // Counterparty may have two words split by newline: "KRISCENT \n TECHNO" -> "KRISCENT TECHNO"
-    return { counterparty: last, remark: "" };
-  }
-  return null;
+const extractUPI = (text: string): PartyDetails | null => {
+  // UPI and UP both appear as prefixes in supported bank statements.
+  const upiRegex =
+    /(?:UPI|UP)\/(?:DR|CR)\/[^/]+\/(?<counterparty>[^/]+)(?:\/(?<bank>[^/]+))?(?:\/(?<remark>[^/]+))?/iu;
+  const upiMatch = text.match(upiRegex);
+  return upiMatch
+    ? extractStructuredUPI(text, upiMatch)
+    : extractFallbackUPI(text);
 };
 
-const extractIMPS = (text: string) => {
-  if (text.includes("IMPS")) {
-    const parts = text
-      .split("/")
-      .map((p) => p.trim())
-      .filter(Boolean);
-    // IMPS/<id>/<counterparty with - >
-    if (parts.length >= 3) {
-      let cp = parts[2];
-      let remark = parts[3] || "";
-      // Handle "IPOS-xx298-PURVIKA " -> extract PURVIKA
-      if (cp.includes("-")) {
-        const sub = cp.split("-");
-        // Last part that is alphabetic and not numbers is likely name
-        const nameCandidate =
-          sub.filter((s) => /[A-Z]{3,}/i.test(s)).pop() || sub.at(-1);
-        if (nameCandidate) {
-          remark = remark || cp;
-          cp = nameCandidate.replaceAll(/[^A-Z\s]/gi, "").trim();
-        }
-      }
-      return { counterparty: cp, remark };
+const extractNEFT = (text: string): PartyDetails | null => {
+  if (!text.includes("NEFT")) {
+    return null;
+  }
+  const parts = text
+    .split("*")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  // The counterparty can span a newline, for example "KRISCENT \\n TECHNO".
+  return { bank: "", counterparty: parts.at(-1) ?? "", remark: "" };
+};
+
+const extractIMPS = (text: string): PartyDetails | null => {
+  if (!text.includes("IMPS")) {
+    return null;
+  }
+  const parts = text
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length < 3) {
+    return null;
+  }
+
+  let counterparty = parts.at(2) ?? "";
+  let remark = parts.at(3) ?? "";
+  if (counterparty.includes("-")) {
+    const segments = counterparty.split("-");
+    const nameCandidate =
+      segments.toReversed().find((segment) => /[A-Z]{3,}/iu.test(segment)) ??
+      segments.at(-1);
+    if (nameCandidate) {
+      remark ||= counterparty;
+      counterparty = nameCandidate.replaceAll(/[^A-Z\s]/giu, "").trim();
     }
   }
-  return null;
+  return { bank: "", counterparty, remark };
 };
 
-export const parseTransactionText = (rawInput: string): ParsedTransaction => {
-  const withoutAccount = cleanAccountHolder(rawInput);
-  const stripped = stripPrefixes(withoutAccount);
-  const normalized = stripped.replaceAll(/\s+/g, " ").trim();
-  const upper = normalized.toUpperCase();
+interface KeywordSplit {
+  after: string;
+  before: string;
+}
 
-  // Determine type from original raw (DEP vs WDL) before stripping
-  let transaction_type: TransactionType = "OUTFLOW";
-  const rawUpper = rawInput.toUpperCase();
-  if (
-    rawUpper.includes("DEP TFR") ||
-    rawUpper.includes("/CR/") ||
-    rawUpper.includes(" CR ") ||
-    rawUpper.trim().startsWith("DEP")
-  ) {
-    transaction_type = "INFLOW";
-  } else if (
-    rawUpper.includes("WDL TFR") ||
-    rawUpper.includes("/DR/") ||
-    rawUpper.includes("DEBIT")
-  ) {
-    transaction_type = "OUTFLOW";
+const splitAroundKeyword = (
+  text: string,
+  keyword: string,
+  fromEnd = false
+): KeywordSplit | null => {
+  const marker = ` ${keyword.toUpperCase()} `;
+  const upperText = text.toUpperCase();
+  const markerIndex = fromEnd
+    ? upperText.lastIndexOf(marker)
+    : upperText.indexOf(marker);
+  if (markerIndex === -1) {
+    return null;
+  }
+  return {
+    after: text.slice(markerIndex + marker.length),
+    before: text.slice(0, markerIndex),
+  };
+};
+
+const extractFallbackParty = (
+  normalized: string,
+  upper: string
+): PartyDetails => {
+  if (upper.includes(" OF ")) {
+    const ofSplit = splitAroundKeyword(normalized, "OF", true);
+    const afterOf = ofSplit?.after ?? "";
+    if (afterOf.toUpperCase().includes("SBI CARDS")) {
+      return {
+        bank: "",
+        counterparty: "SBI CARDS AND PAYMENT",
+        remark: "Credit Card Bill",
+      };
+    }
+    const atSplit = splitAroundKeyword(afterOf, "AT");
+    const counterparty = atSplit?.before ?? afterOf;
+    return { bank: "", counterparty: counterparty.trim(), remark: "" };
   }
 
-  // Determine payment method - UP is alias for UPI in some bank statements
-  let payment_method: PaymentMethod = "OTHER";
-  if (
-    upper.includes("UPI") ||
-    upper.match(/\bUP\/DR\b/) ||
-    upper.match(/\bUP\/CR\b/)
-  ) {
-    payment_method = "UPI";
-  } else if (upper.includes("NEFT")) {
-    payment_method = "NEFT";
-  } else if (upper.includes("IMPS")) {
-    payment_method = "IMPS";
-  } else if (upper.includes("ATMCARD") || upper.includes("ATM")) {
-    payment_method = "ATM";
-  } else if (upper.includes("CASH") || upper.includes("X/CASH")) {
-    payment_method = "CASH";
+  if (upper.includes("BILL PAYMENT")) {
+    const [, after = ""] = normalized.split(/BILL PAYMENT/iu);
+    const remark = after.replaceAll(/[-_]/gu, " ").trim().slice(0, 80);
+    return {
+      bank: "",
+      counterparty: "Bill Payment",
+      remark: remark || "Bill Payment",
+    };
   }
 
-  let counterparty = "";
-  let user_remark = "";
+  if (upper.includes("SBI CARDS")) {
+    return {
+      bank: "",
+      counterparty: "SBI CARDS AND PAYMENT",
+      remark: "Credit Card Bill",
+    };
+  }
 
-  // Try parsers in order - UPI first
+  if (upper.includes("ATMCARD") || upper.includes("AMC")) {
+    const amcMatch = normalized.match(/AMC\s+(?<fee>[\d*]+)/iu);
+    const fee = amcMatch?.groups?.fee;
+    return {
+      bank: "",
+      counterparty: "AMC",
+      remark: fee ? `AMC Fee ${fee}` : "ATM Card AMC",
+    };
+  }
+
+  const tokens = normalized
+    .split(/\s+/u)
+    .filter(
+      (token) =>
+        token.length > 2 &&
+        !BANK_CODES.has(token.toUpperCase()) &&
+        !/^[\dX*]+$/u.test(token)
+    );
+  return {
+    bank: "",
+    counterparty: tokens.slice(-3).join(" ").slice(0, 60) || "Unknown",
+    remark: "",
+  };
+};
+
+const extractPartyDetails = (
+  normalized: string,
+  upper: string
+): PartyDetails => {
   const upi = extractUPI(normalized);
-  if (upi && upi.counterparty) {
-    counterparty = upi.counterparty;
-    user_remark = upi.remark;
-  } else {
-    const neft = extractNEFT(normalized);
-    if (neft) {
-      counterparty = neft.counterparty;
-      user_remark = neft.remark;
-    } else {
-      const imps = extractIMPS(normalized);
-      if (imps) {
-        counterparty = imps.counterparty;
-        user_remark = imps.remark;
-      } else {
-        // OF pattern: "00XXXXXXXXXXX OF SBI CARDS AND PAYMENT" or "XXXX OF <counterparty>"
-        if (upper.includes(" OF ")) {
-          const ofParts = normalized.split(/\s+OF\s+/i);
-          const afterOf = ofParts.at(-1).trim();
-          // If afterOf contains SBI CARDS, use that
-          if (afterOf.toUpperCase().includes("SBI CARDS")) {
-            counterparty = "SBI CARDS AND PAYMENT";
-            user_remark = "Credit Card Bill";
-          } else {
-            counterparty = afterOf.split(/\s+AT\s+/i)[0].trim();
-            user_remark = "";
-          }
-        } else if (upper.includes("BILL PAYMENT")) {
-          counterparty = "Bill Payment";
-          const after = normalized.split(/BILL PAYMENT/i)[1] || "";
-          user_remark = after.replaceAll(/[-_]/g, " ").trim().slice(0, 80);
-          if (!user_remark) {
-            user_remark = "Bill Payment";
-          }
-        } else if (upper.includes("SBI CARDS")) {
-          counterparty = "SBI CARDS AND PAYMENT";
-          user_remark = "Credit Card Bill";
-        } else if (upper.includes("ATMCARD") || upper.includes("AMC")) {
-          // DEBIT ATMCard AMC
-          const amcMatch = normalized.match(/AMC\s+([\d*]+)/i);
-          counterparty = "AMC";
-          user_remark = amcMatch ? `AMC Fee ${amcMatch[1]}` : "ATM Card AMC";
-        } else {
-          // Fallback: take last meaningful chunk that is not bank code or id
-          const tokens = normalized
-            .split(/\s+/)
-            .filter(
-              (t) =>
-                t.length > 2 &&
-                !BANK_CODES.has(t.toUpperCase()) &&
-                !/^[\dX*]+$/.test(t)
-            );
-          counterparty = tokens.slice(-3).join(" ").slice(0, 60) || "Unknown";
-          user_remark = "";
-        }
-      }
-    }
+  if (upi?.counterparty) {
+    return upi;
   }
+  const neft = extractNEFT(normalized);
+  if (neft) {
+    return neft;
+  }
+  const imps = extractIMPS(normalized);
+  return imps ?? extractFallbackParty(normalized, upper);
+};
 
-  // Clean counterparty and remark
-  counterparty = counterparty
-    .replaceAll(/[^A-Z0-9\s.-]/gi, " ")
-    .replaceAll(/\s+/g, " ")
+const cleanPartyText = (text: string, maxLength: number): string =>
+  text
+    .replaceAll(/[^A-Z0-9\s.-]/giu, " ")
+    .replaceAll(/\s+/gu, " ")
     .trim()
-    .slice(0, 80);
-  user_remark = user_remark
-    .replaceAll(/[^A-Z0-9\s.-]/gi, " ")
-    .replaceAll(/\s+/g, " ")
-    .trim()
-    .slice(0, 120);
+    .slice(0, maxLength);
 
-  // If counterparty is still empty or looks like bank code, try to extract from remark
+interface SanitizedPartyDetails {
+  counterparty: string;
+  userRemark: string;
+}
+
+const sanitizePartyDetails = (details: PartyDetails): SanitizedPartyDetails => {
+  let counterparty = cleanPartyText(details.counterparty, 80);
+  let userRemark = cleanPartyText(details.remark, 120);
+
   if (
     !counterparty ||
     BANK_CODES.has(counterparty.toUpperCase()) ||
-    /^\d+$/.test(counterparty)
+    /^\d+$/u.test(counterparty)
   ) {
-    counterparty = user_remark || "Unknown";
-    user_remark = "";
+    counterparty = userRemark || "Unknown";
+    userRemark = "";
   }
 
-  // Special cleanups
+  const counterpartyUpper = counterparty.toUpperCase();
   if (
-    counterparty.toUpperCase().includes("KKBK") ||
-    counterparty.toUpperCase().includes("YESB")
+    counterpartyUpper.includes("KKBK") ||
+    counterpartyUpper.includes("YESB")
   ) {
-    counterparty = user_remark || counterparty;
+    counterparty = userRemark || counterparty;
   }
 
-  // Determine category - strict rule: remark primary, else counterparty
-  // Also apply Health & Medical specific rules using counterparty and rawInput
-  const primaryForCategory = user_remark || counterparty;
-  let expense_category = getCategoryFromText(
-    primaryForCategory,
-    transaction_type,
+  return { counterparty, userRemark };
+};
+
+const determineTransactionType = (rawUpper: string): TransactionType => {
+  const isInflow =
+    rawUpper.includes("DEP TFR") ||
+    rawUpper.includes("/CR/") ||
+    rawUpper.includes(" CR ") ||
+    rawUpper.trim().startsWith("DEP");
+  return isInflow ? "INFLOW" : "OUTFLOW";
+};
+
+const determinePaymentMethod = (upper: string): PaymentMethod => {
+  if (/UPI|\bUP\/(?:DR|CR)\b/u.test(upper)) {
+    return "UPI";
+  }
+  if (upper.includes("NEFT")) {
+    return "NEFT";
+  }
+  if (upper.includes("IMPS")) {
+    return "IMPS";
+  }
+  if (upper.includes("ATMCARD") || upper.includes("ATM")) {
+    return "ATM";
+  }
+  if (upper.includes("CASH") || upper.includes("X/CASH")) {
+    return "CASH";
+  }
+  return "OTHER";
+};
+
+const determineExpenseCategory = (
+  primaryText: string,
+  transactionType: TransactionType,
+  counterparty: string,
+  userRemark: string,
+  rawInput: string
+): string => {
+  let expenseCategory = getCategoryFromText(
+    primaryText,
+    transactionType,
     counterparty,
     rawInput
   );
-
-  // If remark exists but category still Other, try counterparty
-  if (expense_category === "Other" && user_remark && counterparty) {
-    const alt = getCategoryFromText(
+  if (expenseCategory === OTHER_CATEGORY && userRemark && counterparty) {
+    const alternative = getCategoryFromText(
       counterparty,
-      transaction_type,
+      transactionType,
       counterparty,
       rawInput
     );
-    if (alt !== "Other") {
-      expense_category = alt;
+    if (alternative !== OTHER_CATEGORY) {
+      expenseCategory = alternative;
     }
   }
 
-  // Final health check directly on counterparty + suffix (even if primary was Other)
-  if (expense_category === "Other" || expense_category === "Shopping") {
+  if (expenseCategory === OTHER_CATEGORY || expenseCategory === "Shopping") {
     const suffix = extractSuffixHandleArea(rawInput);
-    const healthDirect = checkHealthMedical(counterparty, rawInput, suffix);
-    if (healthDirect) {
-      expense_category = healthDirect;
+    const healthCategory = checkHealthMedical(counterparty, suffix);
+    if (healthCategory) {
+      expenseCategory = healthCategory;
     }
   }
+  return expenseCategory;
+};
 
-  // Salary override
-  const is_salary = SALARY_KEYWORDS.some((k) => upper.includes(k));
-  if (is_salary && transaction_type === "INFLOW") {
-    expense_category = "Salary";
-  }
-
-  // Bill detection
-  const is_bill = BILL_KEYWORDS.some(
-    (k) =>
-      upper.includes(k) ||
-      counterparty.toUpperCase().includes(k) ||
-      user_remark.toUpperCase().includes(k)
-  );
-
-  // Recurring candidate if bill or subscription
-  const is_recurring_candidate =
-    is_bill ||
-    ["Utilities", "Subscriptions", "Rent"].includes(expense_category);
-
-  // Lending detection: strict - person name, outflow, UPI/IMPS, remark is cash/empty/lent/borrow, not shopping/business
-  const isPerson =
-    LENDING_PERSON_PATTERN.test(counterparty.toUpperCase()) &&
-    !BILL_KEYWORDS.some((k) => counterparty.toUpperCase().includes(k));
-  const lowerRemark = user_remark.toLowerCase();
-  const lowerCounter = counterparty.toLowerCase();
+const hasShoppingHint = (userRemark: string, counterparty: string): boolean => {
   const shoppingHints = [
     "deposit",
     "vyapar",
@@ -776,37 +921,107 @@ export const parseTransactionText = (rawInput: string): ParsedTransaction => {
     "amazon",
     "flipkart",
   ];
-  const isShoppingHint = shoppingHints.some(
-    (k) => lowerRemark.includes(k) || lowerCounter.includes(k)
+  const lowerRemark = userRemark.toLowerCase();
+  const lowerCounterparty = counterparty.toLowerCase();
+  return shoppingHints.some(
+    (hint) => lowerRemark.includes(hint) || lowerCounterparty.includes(hint)
   );
-  const isCashHint =
-    lowerRemark.includes("cash") ||
-    lowerRemark === "" ||
-    lowerRemark.includes("lent") ||
-    lowerRemark.includes("borrow") ||
-    lowerRemark.includes("x cash");
-  const is_lending =
-    isPerson &&
-    (payment_method === "UPI" || payment_method === "IMPS") &&
-    transaction_type === "OUTFLOW" &&
-    !is_bill &&
-    isCashHint &&
-    !isShoppingHint;
+};
 
-  const clean_note =
-    `${counterparty}${user_remark ? ` - ${user_remark}` : ""}`.trim();
+const isLikelyCashLendingRemark = (userRemark: string): boolean => {
+  const lowerRemark = userRemark.toLowerCase();
+  const cashHints = ["cash", "lent", "borrow", "x cash"];
+  return (
+    lowerRemark === "" || cashHints.some((hint) => lowerRemark.includes(hint))
+  );
+};
+
+const detectSalary = (upper: string): boolean =>
+  SALARY_KEYWORDS.some((keyword) => upper.includes(keyword));
+
+const detectBill = (
+  upper: string,
+  counterparty: string,
+  userRemark: string
+): boolean => {
+  const counterpartyUpper = counterparty.toUpperCase();
+  const remarkUpper = userRemark.toUpperCase();
+  return BILL_KEYWORDS.some(
+    (keyword) =>
+      upper.includes(keyword) ||
+      counterpartyUpper.includes(keyword) ||
+      remarkUpper.includes(keyword)
+  );
+};
+
+const detectLending = (
+  counterparty: string,
+  userRemark: string,
+  paymentMethod: PaymentMethod,
+  transactionType: TransactionType,
+  isBill: boolean
+): boolean => {
+  const counterpartyUpper = counterparty.toUpperCase();
+  const isPerson =
+    LENDING_PERSON_PATTERN.test(counterpartyUpper) &&
+    !BILL_KEYWORDS.some((keyword) => counterpartyUpper.includes(keyword));
+  const conditions = [
+    isPerson,
+    paymentMethod === "UPI" || paymentMethod === "IMPS",
+    transactionType === "OUTFLOW",
+    !isBill,
+    isLikelyCashLendingRemark(userRemark),
+    !hasShoppingHint(userRemark, counterparty),
+  ];
+  return conditions.every(Boolean);
+};
+
+export const parseTransactionText = (rawInput: string): ParsedTransaction => {
+  const withoutAccount = cleanAccountHolder(rawInput);
+  const stripped = stripPrefixes(withoutAccount);
+  const normalized = stripped.replaceAll(/\s+/gu, " ").trim();
+  const upper = normalized.toUpperCase();
+  const transactionType = determineTransactionType(rawInput.toUpperCase());
+  const paymentMethod = determinePaymentMethod(upper);
+  const partyDetails = extractPartyDetails(normalized, upper);
+  const { counterparty, userRemark } = sanitizePartyDetails(partyDetails);
+  const primaryText = userRemark || counterparty;
+  let expenseCategory = determineExpenseCategory(
+    primaryText,
+    transactionType,
+    counterparty,
+    userRemark,
+    rawInput
+  );
+  const isSalary = detectSalary(upper);
+  if (isSalary && transactionType === "INFLOW") {
+    expenseCategory = SALARY_CATEGORY;
+  }
+  const isBill = detectBill(upper, counterparty, userRemark);
+  const isRecurringCandidate =
+    isBill || ["Utilities", "Subscriptions", "Rent"].includes(expenseCategory);
+  const isLending = detectLending(
+    counterparty,
+    userRemark,
+    paymentMethod,
+    transactionType,
+    isBill
+  );
+  const cleanNote = userRemark
+    ? `${counterparty} - ${userRemark}`
+    : counterparty;
 
   return {
-    clean_note,
+    clean_note: cleanNote,
     counterparty: counterparty || "Unknown",
-    expense_category,
-    is_bill,
-    is_lending,
-    is_recurring_candidate,
-    is_salary,
-    payment_method,
-    transaction_type,
-    user_remark,
+    expense_category: expenseCategory,
+    is_bill: isBill,
+    is_lending: isLending,
+    is_recurring_candidate: isRecurringCandidate,
+    is_salary: isSalary,
+    payment_method: paymentMethod,
+    transaction_type: transactionType,
+    user_remark: userRemark,
   };
 };
 
@@ -825,9 +1040,9 @@ if (import.meta.main) {
   ];
 
   console.log("Testing financial parser with provided examples:\n");
-  for (const ex of examples) {
-    console.log(`Input: ${ex.replaceAll(/\s+/g, " ").slice(0, 80)}...`);
-    console.log(JSON.stringify(parseTransactionText(ex), null, 2));
+  for (const example of examples) {
+    console.log(`Input: ${example.replaceAll(/\s+/gu, " ").slice(0, 80)}...`);
+    console.log(JSON.stringify(parseTransactionText(example), null, 2));
     console.log("---");
   }
 }

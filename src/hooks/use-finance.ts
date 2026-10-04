@@ -11,6 +11,7 @@ import type { BackupFile } from "../lib/store";
 import type { Txn } from "../lib/types";
 import { makeActions } from "./finance-actions";
 import { useFinanceState } from "./use-finance-state";
+import { useNow } from "./use-now";
 import { useToast } from "./use-toast";
 
 export interface QuickSave {
@@ -28,7 +29,7 @@ export const useFinance = () => {
   const { txns, loans, recurrings, promises, settings, dismissed } = state;
   const [shortfall, setShortfall] = useState<Shortfall | null>(null);
   const { say, toast } = useToast();
-  const now = new Date();
+  const now = useNow();
 
   const act = (a: FinAction, msg?: string) => {
     dispatch(a);

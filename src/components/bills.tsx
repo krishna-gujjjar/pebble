@@ -1,6 +1,7 @@
 import { CalendarClock, Plus } from "lucide-react";
 import { useState } from "react";
 
+import { useNow } from "../hooks/use-now";
 import type { RecurringCandidate } from "../lib/analytics";
 import { cardSpendSince } from "../lib/card";
 import { isoDay, money } from "../lib/format";
@@ -47,7 +48,7 @@ const Bills = ({
 }) => {
   const [formOpen, setFormOpen] = useState(false);
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
-  const today = isoDay(new Date());
+  const today = isoDay(useNow());
   const active = recurrings.filter((r) => r.active);
   const paused = recurrings.filter((r) => !r.active);
   const selected = selectedUid

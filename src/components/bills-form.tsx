@@ -22,7 +22,9 @@ const BillsForm = ({
 }) => {
   const [title, setTitle] = useState(initial?.title || "");
   const [amount, setAmount] = useState(
-    initial?.amount == null ? "" : String(initial.amount)
+    initial?.amount === undefined || initial?.amount === null
+      ? ""
+      : String(initial.amount)
   );
   const [category, setCategory] = useState(initial?.category || "Utilities");
   const [frequency, setFrequency] = useState<Frequency>(

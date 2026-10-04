@@ -49,11 +49,13 @@ export const cardSpendSince = (txns: Txn[], since: string): number => {
 const monthKeyOf = (d: Date): string =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
 
+interface CardStatement {
+  amount: number;
+  key: string;
+}
+
 /** statement of the previous month, for the card */
-export const lastStatement = (
-  txns: Txn[],
-  now: Date
-): { amount: number; key: string } => {
+export const lastStatement = (txns: Txn[], now: Date): CardStatement => {
   const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   const key = monthKeyOf(prev);
   return { amount: cardSpendIn(txns, key), key };

@@ -1,5 +1,5 @@
 import { CARD_SETTLE_METHOD } from "./card";
-import { addDays, addMonths } from "./format";
+import { addDays, addMonths, compareDateStrings } from "./format";
 import {
   createLoan,
   createRecurring,
@@ -51,80 +51,180 @@ export type FinAction =
     }
   | { type: "wipe" };
 
+const isTrackedBillFrequency = (frequency: Recurring["frequency"]): boolean =>
+  frequency === "monthly" || frequency === "variable" || frequency === "yearly";
+
+const nextDueAfterPayment = (
+  frequency: Recurring["frequency"],
+  date: string
+): string => {
+  if (frequency === "variable") {
+    return addDays(date, 50);
+  }
+  const months = frequency === "yearly" ? 12 : 1;
+  return addMonths(date, months);
+};
+
+const updateBillFromTransaction = (
+  recurring: Recurring,
+  txn: Txn
+): Recurring => {
+  const alreadyPaidOnOrAfter =
+    recurring.lastPaid !== undefined && txn.date <= recurring.lastPaid;
+  if (
+    !recurring.active ||
+    !isTrackedBillFrequency(recurring.frequency) ||
+    !isBillMatch(recurring.title, txn.note) ||
+    alreadyPaidOnOrAfter
+  ) {
+    return recurring;
+  }
+
+  const nextDue = nextDueAfterPayment(recurring.frequency, txn.date);
+  if (recurring.card) {
+    return {
+      ...recurring,
+      lastPaid: txn.date,
+      nextDue,
+      settlements: [
+        ...(recurring.settlements ?? []),
+        {
+          amount: txn.amount,
+          date: txn.date,
+          pay: txn.payment || CARD_SETTLE_METHOD,
+        },
+      ],
+    };
+  }
+
+  const amounts = [
+    ...(recurring.amounts ?? [recurring.amount]),
+    txn.amount,
+  ].filter((amount) => amount > 0);
+  const average =
+    amounts.reduce((total, amount) => total + amount, 0) / amounts.length;
+  return {
+    ...recurring,
+    amount: amounts.length > 1 ? Math.round(average * 100) / 100 : txn.amount,
+    amounts,
+    averageAmount: Math.round(average * 100) / 100,
+    lastPaid: txn.date,
+    latestAmount: txn.amount,
+    nextDue,
+    occurrences: amounts.length,
+  };
+};
+
+const updateBillsFromTransaction = (
+  recurrings: Recurring[],
+  txn: Txn
+): Recurring[] => {
+  if (txn.kind !== "expense") {
+    return recurrings;
+  }
+  return recurrings.map((recurring) =>
+    updateBillFromTransaction(recurring, txn)
+  );
+};
+
+const restoreRecurringBill = (recurring: Recurring, txns: Txn[]): Recurring => {
+  const rec = { ...recurring };
+  const lowerTitle = rec.title.toLowerCase();
+  if (
+    (lowerTitle.includes("gas") && lowerTitle.includes("cylinder")) ||
+    lowerTitle.includes("lpg")
+  ) {
+    rec.frequency = "variable";
+  }
+  if (!rec.active || !isTrackedBillFrequency(rec.frequency)) {
+    return rec;
+  }
+
+  const matches = txns
+    .filter((txn) => txn.kind === "expense" && isBillMatch(rec.title, txn.note))
+    .toSorted((a, b) => compareDateStrings(a.date, b.date));
+  const latest = matches.at(-1);
+  if (!latest) {
+    return rec;
+  }
+
+  if (rec.lastPaid && rec.lastPaid > latest.date) {
+    if (rec.nextDue < rec.lastPaid) {
+      return {
+        ...rec,
+        nextDue: nextDueAfterPayment(rec.frequency, rec.lastPaid),
+      };
+    }
+    return rec;
+  }
+
+  const nextDue = nextDueAfterPayment(rec.frequency, latest.date);
+  if (rec.card) {
+    const mergedSettlements = [
+      ...(rec.settlements ?? []),
+      ...matches.map((txn) => ({
+        amount: txn.amount,
+        date: txn.date,
+        pay: txn.payment,
+      })),
+    ].toSorted((a, b) => compareDateStrings(a.date, b.date));
+    const seen = new Set<string>();
+    const deduped = mergedSettlements.filter((settlement) => {
+      const key = `${settlement.date}|${settlement.amount}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+    const lastSettlement = deduped.at(-1);
+    if (!lastSettlement) {
+      return rec;
+    }
+    const cardNextDue =
+      rec.frequency === "variable"
+        ? addDays(lastSettlement.date, 50)
+        : addMonths(lastSettlement.date, 1);
+    return {
+      ...rec,
+      lastPaid: lastSettlement.date,
+      nextDue: cardNextDue,
+      settlements: deduped,
+    };
+  }
+
+  const amounts = matches.map((txn) => txn.amount);
+  const average =
+    amounts.reduce((total, amount) => total + amount, 0) / amounts.length;
+  return {
+    ...rec,
+    amount:
+      amounts.length > 1 ? Math.round(average * 100) / 100 : latest.amount,
+    amounts,
+    averageAmount: Math.round(average * 100) / 100,
+    lastPaid: latest.date,
+    latestAmount: latest.amount,
+    nextDue,
+    occurrences: amounts.length,
+  };
+};
+
+const restoreRecurringBills = (
+  recurrings: Recurring[],
+  txns: Txn[]
+): Recurring[] =>
+  recurrings.map((recurring) => restoreRecurringBill(recurring, txns));
+
 export const financeReducer = (
   state: FinState,
   action: FinAction
 ): FinState => {
   switch (action.type) {
     case "add-txn": {
-      const { txn } = action;
-      // Auto-mark recurring bills as paid when transaction with same name added (monthly + variable bills)
-      // ponytail: reuse isBillMatch, stdlib Date, minimal code
-      let updatedRecurrings = state.recurrings;
-      if (txn.kind === "expense") {
-        const today = txn.date;
-        updatedRecurrings = state.recurrings.map((r) => {
-          if (!r.active) {
-            return r;
-          }
-          if (
-            r.frequency !== "monthly" &&
-            r.frequency !== "variable" &&
-            r.frequency !== "yearly"
-          ) {
-            return r;
-          }
-          if (!isBillMatch(r.title, txn.note)) {
-            return r;
-          }
-          if (r.lastPaid && today < r.lastPaid) {
-            return r;
-          }
-          if (r.lastPaid && today === r.lastPaid) {
-            return r;
-          }
-          let nextDue: string;
-          if (r.frequency === "variable") {
-            nextDue = addDays(today, 50);
-          } else {
-            nextDue = addMonths(today, r.frequency === "yearly" ? 12 : 1);
-          }
-          if (r.card) {
-            return {
-              ...r,
-              lastPaid: today,
-              nextDue,
-              settlements: [
-                ...(r.settlements ?? []),
-                {
-                  amount: txn.amount,
-                  date: today,
-                  pay: txn.payment || CARD_SETTLE_METHOD,
-                },
-              ],
-            };
-          }
-          const amounts = [...(r.amounts ?? [r.amount]), txn.amount].filter(
-            (a) => a > 0
-          );
-          const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
-          return {
-            ...r,
-            amount:
-              amounts.length > 1 ? Math.round(avg * 100) / 100 : txn.amount,
-            amounts,
-            averageAmount: Math.round(avg * 100) / 100,
-            lastPaid: today,
-            latestAmount: txn.amount,
-            nextDue,
-            occurrences: amounts.length,
-          };
-        });
-      }
       return {
         ...state,
-        recurrings: updatedRecurrings,
-        txns: [txn, ...state.txns],
+        recurrings: updateBillsFromTransaction(state.recurrings, action.txn),
+        txns: [action.txn, ...state.txns],
       };
     }
     case "update-txn": {
@@ -218,108 +318,10 @@ export const financeReducer = (
       return { ...state, dismissed: action.ids };
     }
     case "replace": {
-      // On restore, auto-link existing transactions to monthly/variable bills (same name) and update lastPaid/nextDue
-      // FIX: previously sorted descending and picked oldest as latest → Next due Apr 22 Last paid Mar 22 bug
-      // Now sort ascending, pick max date as latest, preserve variable handling
-      const fixedRecurrings = action.recurrings.map((r) => {
-        const rec = { ...r };
-        const lowerTitle = rec.title.toLowerCase();
-        if (
-          (lowerTitle.includes("gas") && lowerTitle.includes("cylinder")) ||
-          lowerTitle.includes("lpg")
-        ) {
-          rec.frequency = "variable";
-        }
-        if (!rec.active) {
-          return rec;
-        }
-        if (
-          rec.frequency !== "monthly" &&
-          rec.frequency !== "variable" &&
-          rec.frequency !== "yearly"
-        ) {
-          return rec;
-        }
-        const matches = action.txns
-          .filter((t) => t.kind === "expense" && isBillMatch(rec.title, t.note))
-          .toSorted((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-        if (matches.length === 0) {
-          return rec;
-        }
-        const latest = matches.at(-1);
-        if (rec.lastPaid && rec.lastPaid > latest.date) {
-          // existing is already newer, keep it but ensure nextDue is correct
-          let nextDueExisting: string;
-          if (rec.frequency === "variable") {
-            nextDueExisting = addDays(rec.lastPaid, 50);
-          } else {
-            nextDueExisting = addMonths(
-              rec.lastPaid,
-              rec.frequency === "yearly" ? 12 : 1
-            );
-          }
-          // if existing nextDue is before today or before latest+freq, fix it
-          if (rec.nextDue < rec.lastPaid) {
-            return { ...rec, nextDue: nextDueExisting };
-          }
-          return rec;
-        }
-        let nextDue: string;
-        if (rec.frequency === "variable") {
-          nextDue = addDays(latest.date, 50);
-        } else {
-          nextDue = addMonths(latest.date, rec.frequency === "yearly" ? 12 : 1);
-        }
-        if (rec.card) {
-          // merge settlements: keep existing + matches, sorted, dedup by date
-          const mergedSettlements = [
-            ...(rec.settlements ?? []),
-            ...matches.map((m) => ({
-              amount: m.amount,
-              date: m.date,
-              pay: m.payment,
-            })),
-          ].toSorted((a, b) =>
-            a.date < b.date ? -1 : a.date > b.date ? 1 : 0
-          );
-          // dedup by date+amount
-          const seen = new Set<string>();
-          const deduped = mergedSettlements.filter((s) => {
-            const k = `${s.date}|${s.amount}`;
-            if (seen.has(k)) {
-              return false;
-            }
-            seen.add(k);
-            return true;
-          });
-          const lastSettle = deduped.at(-1) ?? {
-            amount: latest.amount,
-            date: latest.date,
-          };
-          return {
-            ...rec,
-            lastPaid: lastSettle.date,
-            nextDue:
-              rec.frequency === "variable"
-                ? addDays(lastSettle.date, 50)
-                : addMonths(lastSettle.date, 1),
-            settlements: deduped,
-          };
-        }
-        const amounts = matches.map((m) => m.amount);
-        const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
-        return {
-          ...rec,
-          amount:
-            amounts.length > 1 ? Math.round(avg * 100) / 100 : latest.amount,
-          amounts,
-          averageAmount: Math.round(avg * 100) / 100,
-          lastPaid: latest.date,
-          latestAmount: latest.amount,
-          nextDue,
-          occurrences: amounts.length,
-        };
-      });
+      const fixedRecurrings = restoreRecurringBills(
+        action.recurrings,
+        action.txns
+      );
       return {
         dismissed: [],
         loans: action.loans,

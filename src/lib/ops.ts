@@ -1,7 +1,7 @@
 import { CARD_SETTLE_METHOD } from "./card";
 import { addDays, addMonths, isoDay, round2 } from "./format";
 import { uid } from "./store";
-import type { Loan, Recurring, Txn } from "./types";
+import type { Frequency, Loan, Recurring, Txn } from "./types";
 
 export interface LoanRecord {
   amount: number;
@@ -16,7 +16,7 @@ export interface RecRecord {
   title: string;
   amount: number;
   category: string;
-  frequency: "monthly" | "weekly" | "yearly" | "variable";
+  frequency: Frequency;
   nextDue: string;
   /** credit-card bill: settle it without logging any spending */
   card?: boolean;
@@ -200,11 +200,7 @@ export const updateRecurring = (
   // Variable bill: preserve history, update latest, recalc avg
   const prevAmounts = existing.amounts ?? [existing.amount];
   const newAmounts = [...prevAmounts];
-  if (newAmounts.length > 0 && newAmounts.at(-1) === existing.latestAmount) {
-    newAmounts[newAmounts.length - 1] = newAmt;
-  } else if (newAmounts.at(-1) !== newAmt) {
-    newAmounts[newAmounts.length - 1] = newAmt;
-  }
+  newAmounts[newAmounts.length - 1] = newAmt;
   const avg = round2(newAmounts.reduce((a, b) => a + b, 0) / newAmounts.length);
 
   return {

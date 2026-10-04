@@ -34,6 +34,20 @@
           "unusedDisableDirectives": "deny"
         }
       }
+    },
+    "vtsls": {
+      "settings": {
+        "javascript": {
+          "preferences": {
+            "includePackageJsonAutoImports": "on"
+          }
+        },
+        "typescript": {
+          "preferences": {
+            "includePackageJsonAutoImports": "on"
+          }
+        }
+      }
     }
   },
   "languages": {

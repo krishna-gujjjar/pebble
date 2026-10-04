@@ -3,7 +3,7 @@ import type { Recurring, Txn } from "./types";
 
 // Strict bill matching to avoid Electricity Bill showing Internet/Water/SBI bills
 export const normalizeTitle = (s: string) =>
-  s.toLowerCase().trim().replaceAll(/\s+/g, " ");
+  s.toLowerCase().trim().replaceAll(/\s+/gu, " ");
 
 export const isBillMatch = (billTitle: string, txnNote: string): boolean => {
   const t = normalizeTitle(billTitle);
@@ -96,9 +96,10 @@ export const isOverdue = (
   if (!r.active) {
     return false;
   }
+  // Gas cylinder refill is based on usage, not a strict monthly schedule.
   if (r.frequency === "variable") {
     return false;
-  } // gas cylinder refill based on usage, not strict monthly
+  }
   if (isPaidThisMonth(r, today, txns)) {
     return false;
   }

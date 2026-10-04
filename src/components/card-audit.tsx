@@ -57,6 +57,8 @@ const CardAudit = ({
   for (const s of settlements) {
     settledTotal += s.amount;
   }
+  const settlementNoun =
+    settlements.length === 1 ? "settlement" : "settlements";
   const newest = purchases.toSorted((a, b) => (a.date < b.date ? 1 : -1));
 
   return (
@@ -78,7 +80,7 @@ const CardAudit = ({
           </p>
           <p className="text-[12px] text-[#8a978d]">
             {purchases.length} entr{purchases.length === 1 ? "y" : "ies"} · in
-            &ldquo;Went out&rdquo;
+            “Went out”
           </p>
         </div>
         <div className="rounded-2xl bg-[#eef5ec] p-3">
@@ -90,7 +92,7 @@ const CardAudit = ({
           </p>
           <p className="text-[12px] text-[#3d4b42]">
             {settlements.length
-              ? `${settlements.length} settlement${settlements.length === 1 ? "" : "s"} · not added again`
+              ? `${settlements.length} ${settlementNoun} · not added again`
               : "nothing settled in this period"}
           </p>
         </div>

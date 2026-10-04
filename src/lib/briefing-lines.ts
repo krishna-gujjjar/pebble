@@ -8,10 +8,13 @@ import { diffDays, isoDay, money, monthKey, prettyDate } from "./format";
 import { isOverdue } from "./recurring";
 import type { InsightCtx, Recurring, Txn } from "./types";
 
-export const sumIn = (
-  txns: Txn[],
-  key: string
-): { exp: number; inc: number; n: number } => {
+export interface MonthTotals {
+  exp: number;
+  inc: number;
+  n: number;
+}
+
+export const sumIn = (txns: Txn[], key: string): MonthTotals => {
   let exp = 0;
   let inc = 0;
   let n = 0;
@@ -58,7 +61,7 @@ export const topCategory = (
     }
   }
   const sorted = [...byCat.entries()].toSorted((a, b) => b[1] - a[1]);
-  const top = sorted[0];
+  const [top] = sorted;
   return top ? { amount: top[1], name: top[0] } : null;
 };
 
@@ -70,7 +73,7 @@ export const nextBillLine = (
   const active = recurrings
     .filter((r) => r.active)
     .toSorted((a, b) => (a.nextDue < b.nextDue ? -1 : 1));
-  const next = active[0];
+  const [next] = active;
   if (!next) {
     return "";
   }

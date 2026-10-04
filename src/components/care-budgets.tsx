@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { useNow } from "../hooks/use-now";
 import { isoDay, money, parseAmount } from "../lib/format";
 import type { Settings, Txn } from "../lib/types";
 import { EXPENSE_CATS } from "../lib/types";
@@ -25,7 +26,7 @@ const CareBudgets = ({
     )
   );
   const [msg, setMsg] = useState("");
-  const mk = isoDay(new Date()).slice(0, 7);
+  const mk = isoDay(useNow()).slice(0, 7);
 
   const spentBy = (() => {
     const m = new Map<string, number>();
